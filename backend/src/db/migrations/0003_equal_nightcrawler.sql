@@ -1,0 +1,1 @@
+ALTER TABLE "user_sessions" ADD COLUMN "last_trade_type" varchar(10) DEFAULT 'sell';

@@ -1,0 +1,16 @@
+services:
+  db:
+    image: postgres:15
+    container_name: wubba_postgres
+    restart: always
+    environment:
+      POSTGRES_DB: wubbavolumebot
+      POSTGRES_USER: wubba_user
+      POSTGRES_PASSWORD: wubba_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+volumes:
+  postgres_data:
