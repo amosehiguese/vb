@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { FundingTierName } from './session';
 
 // Request schemas
 export const validateTokenRequestSchema = z.object({
@@ -45,8 +46,16 @@ export interface SessionCreationResponse {
     decimals: number;
   };
   primaryDex: string;
+  fundingTier: FundingTierName;
+  tierConfig: {
+    name: string;
+    description: string;
+    minFunding: number;
+    maxFunding: number;
+  };
   instructions: TradingInstruction[];
-  autoTrading: AutoTradingConfig;
+  estimatedTrades: number;
+  createdAt: Date;
   error?: string;
 }
 
@@ -80,6 +89,7 @@ export interface AutoTradingConfig {
   minDeposit: number;
   targetDepletion: number;
   revenuePercentage: number;
+  tradingInterval: number;
   isPrivileged: boolean;
 }
 

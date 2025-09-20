@@ -6,54 +6,83 @@ export const SOLANA_CONSTANTS = {
   SOL_DECIMALS: 9,
   MAX_TRANSACTION_SIZE: 1232,
   CONFIRMATION_COMMITMENT: 'confirmed' as const,
-} as const;
-
-export const STRATEGY_CONSTANTS = {
-  // Wallet Pool Configuration
-  WALLET_POOL_SIZE: 50, // Total number of wallets to create per session
-  WHALE_WALLET_PERCENTAGE: 0.04, // 4% of wallets will be "whales"
-  INITIAL_GAS_PER_WALLET: 0.006, // SOL to send to each bot wallet for transaction fees
-
-  // Distribution for Token Funding
-  MIN_RETAIL_TOKEN_PERCENTAGE: 0.1, // Min % of total tokens for a retail wallet
-  MAX_RETAIL_TOKEN_PERCENTAGE: 0.5, // Max % of total tokens for a retail wallet
-  MIN_WHALE_TOKEN_PERCENTAGE: 5,   // Min % of total tokens for a whale wallet
-  MAX_WHALE_TOKEN_PERCENTAGE: 15,  // Max % of total tokens for a whale wallet
-
-  // Randomized Trading Behavior
-  MIN_TRADE_PERCENTAGE: 10, // Min percentage of a wallet's token balance to trade
-  MAX_TRADE_PERCENTAGE: 25, // Max percentage of a wallet's token balance to trade
-  MIN_TRADE_DELAY_MS: 3000,   // Minimum delay between trades (3 seconds)
-  MAX_TRADE_DELAY_MS: 9000,  // Maximum delay between trades (12 seconds)
-
-  MIN_RETAIL_BUY_USD: 0.01, // $0.01
-  MAX_RETAIL_BUY_USD: 0.03, // $0.03
-  MIN_WHALE_BUY_USD: 0.04,  // $0.04
-  MAX_WHALE_BUY_USD: 0.10,  // $0.10
-  
-  // Staggered Re-funding
-  REFILL_BATCH_SIZE: 10, // Number of wallets to re-fund at a time
-  REFILL_GAS_AMOUNT: 0.002, // Amount of SOL to send for a gas refill
-  WALLET_GAS_LOW_THRESHOLD: 0.0005, // SOL balance below which a wallet is considered low on gas
+  FINALIZED_COMMITMENT: 'finalized' as const,
+  RECENT_BLOCKHASH_TIMEOUT: 150000, // 2.5 minutes
 } as const;
 
 // Trading Constants
 export const TRADING_CONSTANTS = {
+  TRADE_AMOUNT_USD: env.TRADE_AMOUNT_USD,
   MIN_WALLET_DEPOSIT: env.MIN_WALLET_DEPOSIT,
   MIN_PRIVILEGED_WALLET_DEPOSIT: env.MIN_PRIVILEGED_WALLET_DEPOSIT,
   MAX_PRIVILEGED_WALLETS: env.MAX_PRIVILEGED_WALLETS,
   REVENUE_PERCENTAGE: env.REVENUE_PERCENTAGE,
-  TARGET_DEPLETION: 95, // 95%
+  TARGET_DEPLETION: 75, // 75%
+  TRADING_BALANCE_DEPLETION_TARGET: 100, 
   DEFAULT_SLIPPAGE: 5, // 5%
   MAX_SLIPPAGE: 20, // 20%
   MIN_LIQUIDITY_USD: 1, // $1 minimum liquidity
-  MAX_CONSECUTIVE_FAILURES: 10,
+  TRADE_INTERVAL_MS: 5000, // 5 seconds between trades
+  MAX_CONSECUTIVE_FAILURES: 5,
   WALLET_BALANCE_CHECK_INTERVAL: 10000, // 10 seconds
-  TRANSACTION_TIMEOUT: 45000, // 30 seconds
+  TRANSACTION_TIMEOUT: 30000, // 30 seconds
   JITO_TIP_LAMPORTS: 10000, // Jito tip amount in lamports (0.00001 SOL)
   ATA_CREATION_FEE_BUFFER: 0.006, // (in SOL) A safe buffer for rent exemption on new token accounts.
   NETWORK_FEE_BUFFER: 0.00001, 
   JUPITER_FEE_BPS: 10, // Jupiter fee constant (0.1%) 
+  FUNDING_TIERS: {
+    MICRO: {
+      name: 'micro',
+      minFunding: 0.01,
+      maxFunding: 0.1,
+      buyPercentageMin: 15,
+      buyPercentageMax: 25,
+      sellPercentageMin: 30,
+      sellPercentageMax: 60,
+      maxBuyUSD: 20,
+      description: 'Micro funding (0.01-0.1 SOL) - Privileged wallets only'
+    },
+    SMALL: {
+      name: 'small',
+      minFunding: 0.1,
+      maxFunding: 1.0,
+      buyPercentageMin: 5,
+      buyPercentageMax: 15,
+      sellPercentageMin: 25,
+      sellPercentageMax: 50,
+      minBuyUSD: 2,
+      maxBuyUSD: 50,
+      description: 'Small funding (0.1-1 SOL)'
+    },
+    STANDARD: {
+      name: 'standard',
+      minFunding: 1.0,
+      maxFunding: 10.0,
+      buyPercentageMin: 2,
+      buyPercentageMax: 4,
+      sellPercentageMin: 25,
+      sellPercentageMax: 50,
+      minBuyUSD: 5,
+      maxBuyUSD: 100,
+      description: 'Standard funding (1-10 SOL)'
+    },
+    HIGH: {
+      name: 'high',
+      minFunding: 10.0,
+      maxFunding: 1000.0,
+      buyPercentageMin: 1,
+      buyPercentageMax: 3,
+      sellPercentageMin: 20,
+      sellPercentageMax: 40,
+      minBuyUSD: 20,
+      maxBuyUSD: 500,
+      description: 'High funding (10+ SOL)'
+    }
+  },
+  BUY_BIAS_PERCENTAGE: 60, // 60% chance of buy, 40% chance of sell
+  MIN_SAME_TYPE_STREAK: 1, // Minimum consecutive same trades
+  MAX_SAME_TYPE_STREAK: 4, // Maximum consecutive same trades
+  VARIANCE_THRESHOLD: 0.7, // When to add more randomness (70%)
 } as const;
 
 // DEX Configuration
@@ -162,6 +191,8 @@ export const HTTP_STATUS = {
 
 // Privileged Wallets (if needed for testing)
 export const PRIVILEGED_WALLET_ADDRESSES = [
+  // Add specific wallet addresses that should be treated as privileged
+  // These would be loaded from environment variables in production
 ] as const;
 
 export type ErrorCode = keyof typeof ERROR_CODES;

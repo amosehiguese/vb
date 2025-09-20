@@ -14,6 +14,17 @@ CREATE TABLE "bot_metrics" (
 	"created_at" timestamp DEFAULT now()
 );
 --> statement-breakpoint
+CREATE TABLE "ephemeral_wallets" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"session_id" varchar(255) NOT NULL,
+	"wallet_address" varchar(44) NOT NULL,
+	"private_key" text NOT NULL,
+	"status" varchar(20) DEFAULT 'created',
+	"created_at" timestamp DEFAULT now(),
+	"updated_at" timestamp DEFAULT now(),
+	CONSTRAINT "ephemeral_wallets_wallet_address_unique" UNIQUE("wallet_address")
+);
+--> statement-breakpoint
 CREATE TABLE "tokens" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"contract_address" varchar(44) NOT NULL,
@@ -36,6 +47,7 @@ CREATE TABLE "tokens" (
 CREATE TABLE "transactions" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"session_id" varchar(255) NOT NULL,
+	"ephemeral_wallet_address" varchar(44),
 	"signature" varchar(88) NOT NULL,
 	"type" varchar(10) NOT NULL,
 	"token_amount" numeric(18, 9),
@@ -59,8 +71,10 @@ CREATE TABLE "user_sessions" (
 	"wallet_address" varchar(44) NOT NULL,
 	"private_key" text NOT NULL,
 	"contract_address" varchar(44) NOT NULL,
+	"funding_tier" varchar(20) DEFAULT 'standard',
 	"token_symbol" varchar(20),
 	"funding_amount" numeric(18, 9),
+	"last_trade_type" varchar(10) DEFAULT 'sell',
 	"current_balance" numeric(18, 9),
 	"initial_balance" numeric(18, 9),
 	"initial_funded_amount" numeric(18, 9),
@@ -69,6 +83,7 @@ CREATE TABLE "user_sessions" (
 	"total_traded" numeric(18, 9) DEFAULT '0',
 	"trades_count" integer DEFAULT 0,
 	"status" varchar(20) DEFAULT 'created',
+	"trading_status" varchar(30) DEFAULT 'idle',
 	"is_privileged" boolean DEFAULT false,
 	"auto_trading_active" boolean DEFAULT false,
 	"target_depletion" numeric(5, 2) DEFAULT '75',
@@ -86,5 +101,6 @@ CREATE TABLE "wallet_balances" (
 	"sol_balance" numeric(18, 9) DEFAULT '0',
 	"token_balance" numeric(18, 9) DEFAULT '0',
 	"token_mint_address" varchar(44),
-	"last_updated" timestamp DEFAULT now()
+	"last_updated" timestamp DEFAULT now(),
+	CONSTRAINT "wallet_balances_wallet_address_unique" UNIQUE("wallet_address")
 );

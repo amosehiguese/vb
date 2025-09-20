@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express';
 import { SessionManagementService } from '../services/SessionManagementService';
 import { AutoTradingService } from '../services/AutoTradingService';
 import { logger } from '../config/logger';
-import { HTTP_STATUS } from '../utils/constants';
+import { HTTP_STATUS, TRADING_CONSTANTS } from '../utils/constants';
 import { SessionCreationResponse } from '../types/api';
 import { SessionStatus } from '../types/session'
 import { createError } from '../middleware/errorHandler';
@@ -18,8 +18,8 @@ export class SessionController {
 
   createSession = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      const { contractAddress, tokenSymbol } = req.body;
-      
+      const { contractAddress, tokenSymbol, fundingTierName } = req.body;
+
       logger.info('Session creation request received', { 
         contractAddress,
         tokenSymbol,
@@ -30,7 +30,8 @@ export class SessionController {
       // Create session
       const result: SessionCreationResponse = await this.sessionManagementService.createSession(
         contractAddress, 
-        tokenSymbol
+        fundingTierName,
+        tokenSymbol,
       );
       
       // Log successful creation
@@ -40,8 +41,6 @@ export class SessionController {
         walletAddress: result.userWallet.address,
         tokenSymbol: result.token.symbol,
         primaryDex: result.primaryDex,
-        minDeposit: result.autoTrading.minDeposit,
-        isPrivileged: result.autoTrading.isPrivileged
       });
 
       // Send response

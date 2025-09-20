@@ -1,5 +1,5 @@
 {
-  "id": "85c1bd0d-4610-47d7-be1a-92e08f711d96",
+  "id": "90e39f2b-b08e-4fd0-9531-d98f93c3620e",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -104,6 +104,73 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.ephemeral_wallets": {
+      "name": "ephemeral_wallets",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "session_id": {
+          "name": "session_id",
+          "type": "varchar(255)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "wallet_address": {
+          "name": "wallet_address",
+          "type": "varchar(44)",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "private_key": {
+          "name": "private_key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "status": {
+          "name": "status",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'created'"
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "now()"
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "ephemeral_wallets_wallet_address_unique": {
+          "name": "ephemeral_wallets_wallet_address_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "wallet_address"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
@@ -239,6 +306,12 @@
           "type": "varchar(255)",
           "primaryKey": false,
           "notNull": true
+        },
+        "ephemeral_wallet_address": {
+          "name": "ephemeral_wallet_address",
+          "type": "varchar(44)",
+          "primaryKey": false,
+          "notNull": false
         },
         "signature": {
           "name": "signature",
@@ -377,6 +450,13 @@
           "primaryKey": false,
           "notNull": true
         },
+        "funding_tier": {
+          "name": "funding_tier",
+          "type": "varchar(20)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'standard'"
+        },
         "token_symbol": {
           "name": "token_symbol",
           "type": "varchar(20)",
@@ -388,6 +468,13 @@
           "type": "numeric(18, 9)",
           "primaryKey": false,
           "notNull": false
+        },
+        "last_trade_type": {
+          "name": "last_trade_type",
+          "type": "varchar(10)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'sell'"
         },
         "current_balance": {
           "name": "current_balance",
@@ -439,6 +526,13 @@
           "primaryKey": false,
           "notNull": false,
           "default": "'created'"
+        },
+        "trading_status": {
+          "name": "trading_status",
+          "type": "varchar(30)",
+          "primaryKey": false,
+          "notNull": false,
+          "default": "'idle'"
         },
         "is_privileged": {
           "name": "is_privileged",
@@ -558,7 +652,15 @@
       "indexes": {},
       "foreignKeys": {},
       "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
+      "uniqueConstraints": {
+        "wallet_balances_wallet_address_unique": {
+          "name": "wallet_balances_wallet_address_unique",
+          "nullsNotDistinct": false,
+          "columns": [
+            "wallet_address"
+          ]
+        }
+      },
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false

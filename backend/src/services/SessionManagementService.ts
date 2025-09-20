@@ -6,7 +6,9 @@ import {
   SessionConfig,
   SessionStatus,
   TradingConfiguration,
-  SessionValidationResult
+  SessionValidationResult,
+  FundingTierName,
+  FundingTier
 } from '../types/session';
 import {
   SessionCreationResponse,
@@ -18,32 +20,27 @@ import {
 } from '../utils/helpers';
 import {
   TRADING_CONSTANTS,
-  STRATEGY_CONSTANTS,
 } from '../utils/constants';
 import { createError } from '../middleware/errorHandler';
 import { TokenValidationService } from './TokenValidationService';
 import { WalletManagementService } from './WalletManagementService';
 import { AutoTradingService } from './AutoTradingService';
-import { Keypair } from "@solana/web3.js";
-import { TradingService } from './TradingService';
-import bs58 from 'bs58';
 
 export class SessionManagementService {
   private tokenValidationService: TokenValidationService;
   private walletManagementService: WalletManagementService;
   private autoTradingService: AutoTradingService;
-  private tradingService: TradingService;
+  private fundingCheckCooldowns: Map<string, number> = new Map();
 
   constructor() {
     this.tokenValidationService = new TokenValidationService();
     this.walletManagementService = new WalletManagementService();
     this.autoTradingService = new AutoTradingService();
-    this.tradingService = new TradingService();
   }
 
-  async createSession(contractAddress: string, tokenSymbol?: string): Promise<SessionCreationResponse> {
+  async createSession(contractAddress: string, fundingTierName: string, tokenSymbol?: string): Promise<SessionCreationResponse> {
     try {
-      logger.info('Creating new trading session', { contractAddress, tokenSymbol });
+      logger.info('Creating new trading session', { contractAddress, tokenSymbol, fundingTierName });
 
       // Validate token first
       const tokenValidation = await this.tokenValidationService.validateToken(contractAddress);
@@ -52,22 +49,30 @@ export class SessionManagementService {
         throw createError.validation('Token validation failed');
       }
 
+      // Validate funding tier access
+      const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[fundingTierName.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
+      if (!tierConfig) {
+        throw createError.validation('Invalid funding tier specified');
+      }
+
       // Generate unique session ID
       const sessionId = generateSessionId();
 
       // Create wallet for this session
-      const mainFundingWallet = await this.walletManagementService.createMainFundingWallet(sessionId);
-      
-      const isPrivileged = await this.walletManagementService.isPrivilegedWallet(mainFundingWallet.address);
-      const tradingConfig = this.createTradingConfiguration(isPrivileged);
+      const wallet = await this.walletManagementService.createUserWallet(sessionId);
 
+      // Check if this is a privileged wallet
+      const isPrivileged = await this.walletManagementService.isPrivilegedWallet(wallet.address);
+      
+      // Create trading configuration
+      const tradingConfig = this.createTradingConfiguration(tierConfig.name);
 
       // Create session data
       const sessionData: SessionConfig = {
         sessionId,
         contractAddress,
         tokenSymbol: tokenSymbol || tokenValidation.token.symbol,
-        wallet: mainFundingWallet,
+        wallet,
         tradingConfig,
         autoTradingEnabled: true,
         status: SessionStatus.CREATED,
@@ -78,18 +83,10 @@ export class SessionManagementService {
       // Save session to database
       await this.persistSession(sessionData);
 
-      // Pre-create the pool of bot wallets for this session
-      await this.walletManagementService.createWalletPool(
-        sessionId, 
-        STRATEGY_CONSTANTS.WALLET_POOL_SIZE, 
-        STRATEGY_CONSTANTS.WHALE_WALLET_PERCENTAGE
-      );
-
       // Start wallet monitoring for funding detection
-      await this.startWalletMonitoring(sessionId, mainFundingWallet.address, isPrivileged);
+      await this.startWalletMonitoring(sessionData);
 
-      const decryptedPrivateKey = this.walletManagementService.decryptPrivateKey(mainFundingWallet.privateKey);
-      const userFriendlyPrivateKey = bs58.encode(decryptedPrivateKey);
+      const instructions = this.generateTradingInstructions(tradingConfig);
 
 
       // Build response
@@ -97,11 +94,18 @@ export class SessionManagementService {
         success: true,
         sessionId,
         wallet: {
-          publicKey: mainFundingWallet.publicKey
+          publicKey: wallet.publicKey
         },
         userWallet: {
-          address: mainFundingWallet.address,
-          privateKey: userFriendlyPrivateKey,
+          address: wallet.address,
+          privateKey: wallet.privateKey // Encrypted private key for client
+        },
+        fundingTier: tierConfig.name,
+        tierConfig: {
+          name: tierConfig.name,
+          description: tierConfig.description,
+          minFunding: tierConfig.minFunding,
+          maxFunding: tierConfig.maxFunding
         },
         token: {
           contractAddress,
@@ -110,13 +114,15 @@ export class SessionManagementService {
           decimals: tokenValidation.token.decimals
         },
         primaryDex: tokenValidation.primaryDex,
-        instructions: this.generateTradingInstructions(tradingConfig),
-        autoTrading: this.buildAutoTradingConfig(tradingConfig)
+        instructions: instructions,
+        estimatedTrades: this.estimateTradeCount(tradingConfig),
+        createdAt: sessionData.createdAt
+
       };
 
       logger.info('Trading session created successfully', {
         sessionId,
-        walletAddress: mainFundingWallet.address,
+        walletAddress: wallet.address,
         contractAddress,
         isPrivileged,
         minDeposit: tradingConfig.minDeposit
@@ -145,24 +151,26 @@ export class SessionManagementService {
       const session = sessions[0];
       
       // Get wallet info
-      const wallet = await this.walletManagementService.getWalletByAddress(session.mainFundingAddress);
+      const wallet = await this.walletManagementService.getWalletByAddress(session.walletAddress);
       if (!wallet) {
-        logger.warn('Wallet not found for session', { sessionId, walletAddress: session.mainFundingAddress });
+        logger.warn('Wallet not found for session', { sessionId, walletAddress: session.walletAddress });
         return null;
       }
 
+      const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[session?.fundingTier?.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
+      const minBuyUSD = 'minBuyUSD' in tierConfig ? tierConfig.minBuyUSD : 0;
       const tradingConfig: TradingConfiguration = {
-        minDeposit: session.isPrivileged 
-          ? TRADING_CONSTANTS.MIN_PRIVILEGED_WALLET_DEPOSIT 
-          : TRADING_CONSTANTS.MIN_WALLET_DEPOSIT,
-        targetDepletion: parseFloat(session.targetDepletion || '75'),
+        minDeposit: tierConfig.minFunding,
+        targetDepletion: TRADING_CONSTANTS.TARGET_DEPLETION,
         revenuePercentage: TRADING_CONSTANTS.REVENUE_PERCENTAGE,
+        tradingInterval: TRADING_CONSTANTS.TRADE_INTERVAL_MS,
         maxSlippage: TRADING_CONSTANTS.DEFAULT_SLIPPAGE,
         tradeSize: {
-          min: session.isPrivileged ? 0.001 : 0.01,
-          max: session.isPrivileged ? 0.01 : 0.1
+          min: minBuyUSD,
+          max: tierConfig.maxBuyUSD
         },
-        isPrivileged: session.isPrivileged || false
+        isPrivileged: session.isPrivileged || false,
+        fundingTier: tierConfig.name,
       };
 
       return {
@@ -185,36 +193,6 @@ export class SessionManagementService {
         error: error instanceof Error ? error.message : 'Unknown error'
       });
       return null;
-    }
-  }
-
-  async pauseAndSweepSession(sessionId: string): Promise<{ success: boolean; message: string; data?: any }> {
-    try {
-        const sessions = await db.select().from(userSessions).where(eq(userSessions.sessionId, sessionId));
-        if (sessions.length == 0) {
-            return { success: false, message: 'Session not found.' };
-        }
-
-        const session = sessions[0];
-
-        // 1. Pause the trading loop first
-        await this.autoTradingService.stopAutoTrading(sessionId, 'User initiated sweep.');
-        await db.update(userSessions).set({ status: SessionStatus.PAUSED }).where(eq(userSessions.sessionId, sessionId));
-
-        logger.info('Session paused, initiating sweep...', { sessionId });
-
-        // 2. Call the sweep function
-        const sweepResult = await this.walletManagementService.sweepAllAssets(sessionId, session.mainFundingAddress);
-
-        if (sweepResult.success) {
-            return { success: true, message: 'All assets swept back to main wallet successfully.', data: sweepResult };
-        } else {
-            return { success: false, message: 'Sweep completed with some errors.', data: sweepResult };
-        }
-
-    } catch (error) {
-        logger.error('Failed during pause and sweep operation', { sessionId, error });
-        return { success: false, message: `An unexpected error occurred: ${error instanceof Error ? error.message : 'Unknown'}` };
     }
   }
 
@@ -299,6 +277,7 @@ export class SessionManagementService {
       const currentBalance = await this.walletManagementService.getWalletBalance(session.wallet.address);
       const validation = await this.walletManagementService.validateWalletFunding(
         session.wallet.address, 
+        session.tradingConfig.fundingTier,
         session.tradingConfig.isPrivileged
       );
 
@@ -334,30 +313,15 @@ export class SessionManagementService {
     }
   }
 
-  private createTradingConfiguration(isPrivileged: boolean): TradingConfiguration {
-    return {
-      minDeposit: isPrivileged 
-        ? TRADING_CONSTANTS.MIN_PRIVILEGED_WALLET_DEPOSIT 
-        : TRADING_CONSTANTS.MIN_WALLET_DEPOSIT,
-      targetDepletion: TRADING_CONSTANTS.TARGET_DEPLETION,
-      revenuePercentage: TRADING_CONSTANTS.REVENUE_PERCENTAGE,
-      maxSlippage: TRADING_CONSTANTS.DEFAULT_SLIPPAGE,
-      tradeSize: {
-        min: isPrivileged ? 0.001 : 0.01, // Smaller trades for privileged wallets
-        max: isPrivileged ? 0.01 : 0.1
-      },
-      isPrivileged
-    };
-  }
-
   private async persistSession(sessionData: SessionConfig): Promise<void> {
     try {
       await db.insert(userSessions).values({
         sessionId: sessionData.sessionId,
-        mainFundingAddress: sessionData.wallet.address,
+        walletAddress: sessionData.wallet.address,
         privateKey: sessionData.wallet.privateKey,
         contractAddress: sessionData.contractAddress,
         tokenSymbol: sessionData.tokenSymbol,
+        lastTradeType: null, 
         status: sessionData.status,
         isPrivileged: sessionData.tradingConfig.isPrivileged,
         autoTradingActive: sessionData.autoTradingEnabled,
@@ -375,68 +339,112 @@ export class SessionManagementService {
       });
       throw createError.database('Failed to save session');
     }
-  }      
+  }
 
-  private async startWalletMonitoring(sessionId: string, walletAddress: string, isPrivileged: boolean): Promise<void> {
-    const balanceCheckCallback = async (balance: number) => {
-      const sessions = await db.select().from(userSessions).where(eq(userSessions.sessionId, sessionId));
-      const session = sessions[0];
-      if (session && session.status === SessionStatus.CREATED) {
-        const validation = await this.walletManagementService.validateWalletFunding(walletAddress, isPrivileged);
+  private async startWalletMonitoring(sessionData: SessionConfig): Promise<void> {
+    try {
+      // Start monitoring wallet for funding detection
+      await this.walletManagementService.monitorWalletBalance(
+        sessionData.wallet.address,
+        async (balance: number) => {
+          await this.handleFundingDetection(sessionData.sessionId, balance);
+        }
+      );
+
+      logger.info('Wallet monitoring started', {
+        sessionId: sessionData.sessionId,
+        walletAddress: sessionData.wallet.address
+      });
+
+    } catch (error) {
+      logger.error('Failed to start wallet monitoring', {
+        sessionId: sessionData.sessionId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
+  }
+
+  private async handleFundingDetection(sessionId: string, balance: number): Promise<void> {
+    try {
+      const session = await this.getSession(sessionId);
+      // If session not found or already processed, do nothing.
+      if (!session) return;
+      
+      // Run the expensive detection logic if the session is still in the 'created' state.
+      if (session.status === SessionStatus.CREATED) {
+        
+        // Detect funding source and update privilege status
+        await this.walletManagementService.updateSessionPrivilegeStatus(sessionId, session.wallet.address);
+        
+        // Get updated session with new privilege status
+        const updatedSession = await this.getSession(sessionId);
+        if (!updatedSession) return;
+    
+        const validation = await this.walletManagementService.validateWalletFunding(
+          session.wallet.address,
+          session.tradingConfig.fundingTier,
+          updatedSession.tradingConfig.isPrivileged
+        );
+    
         if (validation.hasSufficientFunding) {
-            await this.handleFundingDetected(session, validation.currentBalance);
+          const totalFundedAmount = validation.currentBalance;
+    
+          // Transfer 25% revenue immediately upon funding
+          const revenueTransfer = await this.walletManagementService.transferRevenue(
+            session.wallet, 
+            totalFundedAmount
+          );
+    
+          if (revenueTransfer.success) {
+            // Calculate remaining balance for trading (75% of original)
+            const tradingBalance = totalFundedAmount - revenueTransfer.revenueAmount;
+    
+            // Update session with both initial amount and trading balance
+            await this.updateSessionStatus(sessionId, SessionStatus.FUNDED, {
+              fundedAt: new Date(),
+              initialBalance: tradingBalance,
+              balance: tradingBalance, // This is the 75% that will be used for trading
+              initialFundedAmount: totalFundedAmount,
+              revenueTransferred: revenueTransfer.revenueAmount,
+              revenueSignature: revenueTransfer.signature
+            });
+    
+            // Start trading with the remaining 75%
+            await this.autoTradingService.startAutoTrading(sessionId);
+    
+            logger.info('Funding processed: Revenue transferred, trading started', {
+              sessionId,
+              totalFunded: totalFundedAmount,
+              revenueTransferred: revenueTransfer.revenueAmount,
+              tradingBalance,
+              revenueSignature: revenueTransfer.signature,
+              isPrivileged: updatedSession.tradingConfig.isPrivileged
+            });
+          } else {
+            logger.error('Failed to transfer revenue', { sessionId, error: revenueTransfer.success });
+          }
         }
       }
-    };
-    await this.walletManagementService.monitorWalletBalance(walletAddress, balanceCheckCallback);
-  }
-
-  private async handleFundingDetected(session: any, fundedAmount: number): Promise<void> {
-    logger.info('Sufficient funding detected for session', { sessionId: session.sessionId, fundedAmount });
-    
-    // Stop monitoring this wallet to prevent re-triggering
-    await this.walletManagementService.stopWalletMonitoring(session.mainFundingAddress);
-    
-    await this.updateSessionStatus(session.sessionId, SessionStatus.FUNDED, { balance: fundedAmount, fundedAt: new Date() });
-    
-    // Decrypt main wallet key to perform distributions
-    const mainFundingPrivateKey = this.walletManagementService.decryptPrivateKey(session.privateKey);
-    const mainFundingKeypair = Keypair.fromSecretKey(mainFundingPrivateKey);
-
-    // Calculate how many tokens the user's SOL can buy for distribution
-    const tokenInfo = await this.tokenValidationService.getTokenMetadata(session.contractAddress);
-    const tokenPrice = await this.tradingService.getTokenPrice(session.contractAddress);
-    if (tokenPrice === 0) {
-      logger.error("Could not get token price, aborting funding distribution", { sessionId: session.sessionId });
-      await this.updateSessionStatus(session.sessionId, SessionStatus.STOPPED);
-      return;
+    } catch (error) {
+      logger.error('Failed to handle funding detection', { sessionId, error });
     }
-
-    // Allocate 99% of SOL to buy the token, keep 1% for gas buffer
-    const solForPurchase = fundedAmount * 0.99;
-    const totalTokenAmount = (solForPurchase / tokenPrice) * Math.pow(10, tokenInfo.decimals);
-    
-    logger.info('Distributing funds to wallet pool', { sessionId: session.sessionId });
-    await this.updateSessionStatus(session.sessionId, SessionStatus.DISTRIBUTING);
-    
-    await this.walletManagementService.fundWalletPool(session.sessionId, mainFundingKeypair, session.contractAddress, totalTokenAmount);
-
-    // Finally, start the organic trading loop
-    await this.autoTradingService.startAutoTrading(session.sessionId);
   }
+
 
   private generateTradingInstructions(tradingConfig: TradingConfiguration): TradingInstruction[] {
+    const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[tradingConfig.fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
+    
     const instructions: TradingInstruction[] = [
       {
         step: 1,
         action: 'Fund Wallet',
-        description: `Send at least ${tradingConfig.minDeposit} SOL to the provided wallet address to start trading`,
-        minimumAmount: tradingConfig.minDeposit
+        description: `Send between ${tierConfig.minFunding}-${tierConfig.maxFunding} SOL to the provided wallet address. ${tierConfig.description}`,
+        minimumAmount: tierConfig.minFunding
       },
       {
         step: 2,
-        action: 'Automatic Trading',
-        description: `The bot will automatically start trading once funding is detected, generating volume until ${tradingConfig.targetDepletion}% depletion`,
+        action: 'Tier-Based Trading',
+        description: `Using ${tradingConfig.fundingTier} tier: Buys will use ${tierConfig.buyPercentageMin}-${tierConfig.buyPercentageMax}% of SOL balance, sells will use ${tierConfig.sellPercentageMin}-${tierConfig.sellPercentageMax}% of token balance`,
         minimumAmount: 0
       },
       {
@@ -446,18 +454,38 @@ export class SessionManagementService {
         minimumAmount: 0
       }
     ];
-
+  
     return instructions;
   }
 
-  private buildAutoTradingConfig(tradingConfig: TradingConfiguration): AutoTradingConfig {
+  private createTradingConfiguration(fundingTier: FundingTierName): TradingConfiguration {
+    const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
+    const isPrivileged = fundingTier === 'micro';
+
+    const minBuyUSD = 'minBuyUSD' in tierConfig ? tierConfig.minBuyUSD : 0;
+  
     return {
-      enabled: true,
-      minDeposit: tradingConfig.minDeposit,
-      targetDepletion: tradingConfig.targetDepletion,
-      revenuePercentage: tradingConfig.revenuePercentage,
-      isPrivileged: tradingConfig.isPrivileged
+      minDeposit: tierConfig.minFunding,
+      targetDepletion: TRADING_CONSTANTS.TARGET_DEPLETION,
+      revenuePercentage: TRADING_CONSTANTS.REVENUE_PERCENTAGE,
+      tradingInterval: TRADING_CONSTANTS.TRADE_INTERVAL_MS,
+      maxSlippage: TRADING_CONSTANTS.DEFAULT_SLIPPAGE,
+      tradeSize: {
+        min: minBuyUSD || (tierConfig.minFunding * 0.1), // 10% of min funding if no USD min
+        max: tierConfig.maxBuyUSD
+      },
+      isPrivileged,
+      fundingTier
     };
+  }
+
+  private estimateTradeCount(tradingConfig: TradingConfiguration): number {
+    const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[tradingConfig.fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
+    const avgFunding = (tierConfig.minFunding + tierConfig.maxFunding) / 2;
+    const avgTradeSize = avgFunding * (tierConfig.buyPercentageMin + tierConfig.buyPercentageMax) / 200; // Average percentage / 2
+    const tradingBalance = avgFunding * 0.75;
+    
+    return Math.floor(tradingBalance / (avgTradeSize + 0.006)); 
   }
 
   async cleanup(): Promise<void> {

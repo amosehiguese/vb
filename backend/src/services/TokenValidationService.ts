@@ -168,7 +168,7 @@ export class TokenValidationService {
     }
   }
 
-  async getTokenMetadata(contractAddress: string): Promise<TokenMetadata> {
+  private async getTokenMetadata(contractAddress: string): Promise<TokenMetadata> {
     const metadata: Partial<TokenMetadata> = {
       symbol: '',
       name: '',

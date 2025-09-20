@@ -4,22 +4,21 @@ import crypto from 'crypto';
 import { logger } from '../config/logger';
 import { env } from '../config/environment';
 import { db } from '../config/database';
-import { NewSessionWallet, sessionWallets, userSessions, walletBalances } from '../db/schema';
-import { eq, and } from 'drizzle-orm';
+import { userSessions, walletBalances, ephemeralWallets } from '../db/schema';
+import { eq } from 'drizzle-orm';
 import {
   WalletInfo,
+  FundingTierName,
 } from '../types/session';
 import {
   lamportsToSol,
   hasSufficientFunding,
   solToLamports,
   calculateRevenue,
-  delay,
-  getRandomNumber
+  delay
 } from '../utils/helpers';
 import {
   TRADING_CONSTANTS,
-  STRATEGY_CONSTANTS,
   PRIVILEGED_WALLET_ADDRESSES,
 } from '../utils/constants';
 import { createError } from '../middleware/errorHandler';
@@ -29,7 +28,6 @@ export class WalletManagementService {
   private walletCache: Map<string, WalletInfo> = new Map();
   private privilegedWallets: Set<string> = new Set();
 
-  // Encryption key for private keys (should be from environment in production)
   private readonly encryptionKey = crypto.scryptSync(
     env.WALLET_ENCRYPTION_PASSWORD,
     'salt',
@@ -54,7 +52,7 @@ export class WalletManagementService {
     }
   }
 
-  async createMainFundingWallet(sessionId?: string): Promise<WalletInfo> {
+  async createUserWallet(sessionId?: string): Promise<WalletInfo> {
     try {
       logger.info('Creating new user wallet', { sessionId });
 
@@ -75,7 +73,6 @@ export class WalletManagementService {
       const walletInfo: WalletInfo = {
         publicKey,
         address,
-        keypair,
         privateKey: encryptedPrivateKey,
         isPrivileged,
         minDeposit,
@@ -107,145 +104,24 @@ export class WalletManagementService {
     }
   }
 
-  async fundWalletPool(sessionId: string, mainFundingKeypair: Keypair, tokenAddress: string, totalTokenAmount: number): Promise<void> {
-    const wallets = await db.select().from(sessionWallets).where(eq(sessionWallets.sessionId, sessionId));
-    if (wallets.length === 0) throw new Error('No wallets found in pool to fund');
-
-    logger.info('Starting funding process for wallet pool', { sessionId, walletCount: wallets.length });
-
-    // 1. Fund GAS (SOL) to all wallets
-    for (const wallet of wallets) {
-        try {
-            await this.transferFunds(mainFundingKeypair, wallet.walletAddress, STRATEGY_CONSTANTS.INITIAL_GAS_PER_WALLET);
-            logger.debug(`Funded gas to ${wallet.walletType} wallet`, { address: wallet.walletAddress });
-            await delay(getRandomNumber(200, 500)); // Stagger funding
-        } catch (error) {
-            logger.error('Failed to fund gas to a pool wallet', { address: wallet.walletAddress, error });
-        }
-    }
-
-    // 2. Distribute TOKENS
-    const tokenMint = new PublicKey(tokenAddress);
-    let distributedAmount = 0;
-
-    for (const wallet of wallets) {
-        let tokenAmountPercentage: number;
-        if (wallet.walletType === 'whale') {
-            tokenAmountPercentage = getRandomNumber(STRATEGY_CONSTANTS.MIN_WHALE_TOKEN_PERCENTAGE, STRATEGY_CONSTANTS.MAX_WHALE_TOKEN_PERCENTAGE);
-        } else {
-            tokenAmountPercentage = getRandomNumber(STRATEGY_CONSTANTS.MIN_RETAIL_TOKEN_PERCENTAGE, STRATEGY_CONSTANTS.MAX_RETAIL_TOKEN_PERCENTAGE);
-        }
-        
-        const amountToTransfer = Math.floor(totalTokenAmount * (tokenAmountPercentage / 100));
-        distributedAmount += amountToTransfer;
-        
-        try {
-            await this.transferToken(mainFundingKeypair, wallet.walletAddress, tokenAddress, amountToTransfer);
-            await db.update(sessionWallets)
-                .set({ status: 'funded', initialTokenAmount: amountToTransfer.toString(), initialGasAmount: STRATEGY_CONSTANTS.INITIAL_GAS_PER_WALLET.toString() })
-                .where(eq(sessionWallets.walletAddress, wallet.walletAddress));
-            
-            logger.debug(`Distributed tokens to ${wallet.walletType} wallet`, { address: wallet.walletAddress, amount: amountToTransfer });
-            await delay(getRandomNumber(300, 700)); // Stagger funding
-        } catch (error) {
-            logger.error('Failed to distribute tokens to a pool wallet', { address: wallet.walletAddress, amount: amountToTransfer, error });
-        }
-    }
-    logger.info('Token distribution complete', { sessionId, totalDistributed: distributedAmount, outOf: totalTokenAmount });
-  }
-
-  async createWalletPool(sessionId: string, poolSize: number, whalePercentage: number): Promise<void> {
-    logger.info('Creating wallet pool', { sessionId, poolSize, whalePercentage });
-    const walletsToInsert: NewSessionWallet[] = [];
-    const whaleCount = Math.floor(poolSize * whalePercentage);
-
-    for (let i = 0; i < poolSize; i++) {
+  async createAndStoreEphemeralWallet(sessionId: string): Promise<Keypair> {
+    try {
         const keypair = Keypair.generate();
         const encryptedPrivateKey = this.encryptPrivateKey(keypair.secretKey);
-        const walletType = i < whaleCount ? 'whale' : 'retail';
 
-        walletsToInsert.push({
+        await db.insert(ephemeralWallets).values({
             sessionId,
             walletAddress: keypair.publicKey.toString(),
             privateKey: encryptedPrivateKey,
-            walletType,
-            status: 'pending',
+            status: 'created',
         });
+
+        logger.info('Created and stored ephemeral wallet', { sessionId, address: keypair.publicKey.toString() });
+        return keypair;
+    } catch (error) {
+        logger.error('Failed to create ephemeral wallet', { sessionId, error });
+        throw createError.database('Could not create ephemeral wallet');
     }
-
-    await db.insert(sessionWallets).values(walletsToInsert);
-    logger.info('Wallet pool created and stored successfully', { sessionId, count: walletsToInsert.length, whaleCount });
-  }
-
-  async sweepAllAssets(sessionId: string, mainFundingAddress: string): Promise<{ success: boolean; totalTokenSwept: number; totalSolSwept: number; errors: string[] }> {
-    logger.info('Starting asset sweep for session', { sessionId, mainFundingAddress });
-    const wallets = await db.select().from(sessionWallets).where(eq(sessionWallets.sessionId, sessionId));
-    const sessions = await db.select().from(userSessions).where(eq(userSessions.sessionId, sessionId));
-
-    if (sessions.length == 0) {
-      return { success: false, totalTokenSwept: 0, totalSolSwept: 0, errors: ['Session not found'] };
-    }
-    
-    const session = sessions[0];
-
-    const mainFundingPubkey = new PublicKey(mainFundingAddress);
-    let totalTokenSwept = 0;
-    let totalSolSwept = 0;
-    const errors: string[] = [];
-
-    for (const botWallet of wallets) {
-      try {
-        const botKeypair = Keypair.fromSecretKey(this.decryptPrivateKey(botWallet.privateKey));
-        const botPubkey = botKeypair.publicKey;
-
-        // 1. Sweep SPL Token
-        const tokenMint = new PublicKey(session.contractAddress);
-        const botAta = await getAssociatedTokenAddress(tokenMint, botPubkey);
-        
-        try {
-          const botAtaInfo = await getAccount(this.connection, botAta);
-          if (botAtaInfo && botAtaInfo.amount > 0) {
-            const mainAta = await getOrCreateAssociatedTokenAccount(this.connection, botKeypair, tokenMint, mainFundingPubkey);
-            const transferTx = new Transaction().add(
-              createTransferInstruction(botAta, mainAta.address, botPubkey, botAtaInfo.amount)
-            );
-            await sendAndConfirmTransaction(this.connection, transferTx, [botKeypair]);
-            totalTokenSwept += Number(botAtaInfo.amount);
-            logger.debug('Swept token', { from: botPubkey.toString(), amount: Number(botAtaInfo.amount) });
-          }
-        } catch (e) {
-            // It's normal for an account not to be found if it never held the token
-            if (!(e instanceof Error && e.name === 'TokenAccountNotFoundError')) {
-                 logger.warn('Could not sweep token from wallet', { wallet: botPubkey.toString(), error: e });
-            }
-        }
-
-        // 2. Sweep Remaining SOL
-        await delay(500); // Small delay to ensure balances update
-        const solBalance = await this.connection.getBalance(botPubkey);
-        const fee = 5000; // Standard transaction fee
-        if (solBalance > fee) {
-          const transferAmount = solBalance - fee;
-          const solSweepTx = new Transaction().add(
-            SystemProgram.transfer({
-              fromPubkey: botPubkey,
-              toPubkey: mainFundingPubkey,
-              lamports: transferAmount,
-            })
-          );
-          await sendAndConfirmTransaction(this.connection, solSweepTx, [botKeypair]);
-          totalSolSwept += transferAmount;
-          logger.debug('Swept SOL', { from: botPubkey.toString(), amount: lamportsToSol(transferAmount) });
-        }
-      } catch (error) {
-        const errorMessage = `Failed to sweep assets from ${botWallet.walletAddress}: ${error instanceof Error ? error.message : 'Unknown error'}`;
-        logger.error(errorMessage);
-        errors.push(errorMessage);
-      }
-    }
-    
-    logger.info('Asset sweep completed', { sessionId, totalTokenSwept, totalSolSwept: lamportsToSol(totalSolSwept), errors: errors.length });
-    return { success: errors.length === 0, totalTokenSwept, totalSolSwept: lamportsToSol(totalSolSwept), errors };
   }
 
   async transferFunds(fromKeypair: Keypair, toAddress: string, amountSol: number): Promise<string> {
@@ -306,7 +182,66 @@ export class WalletManagementService {
     return signature;
   }
 
- 
+  async sweepAssets(ephemeralKeypair: Keypair, vaultAddress: string, tokenMintAddress: string): Promise<void> {
+    const ephemeralPublicKey = ephemeralKeypair.publicKey;
+    const vaultPublicKey = new PublicKey(vaultAddress);
+    const mintPublicKey = new PublicKey(tokenMintAddress);
+
+    // Sweep SPL Token and Reclaim Rent 
+    try {
+        const tokenAta = await getAssociatedTokenAddress(mintPublicKey, ephemeralPublicKey);
+        const tokenAccountInfo = await this.connection.getAccountInfo(tokenAta);
+
+        if (tokenAccountInfo) {
+            const vaultAta = await getOrCreateAssociatedTokenAccount(this.connection, ephemeralKeypair, mintPublicKey, vaultPublicKey);
+            const balance = await this.getTokenBalance(ephemeralPublicKey.toString(), tokenMintAddress, true);
+
+            const transaction = new Transaction();
+            // First, transfer any remaining tokens
+            if (balance > 0) {
+                transaction.add(
+                    createTransferInstruction(tokenAta, vaultAta.address, ephemeralPublicKey, balance)
+                );
+            }
+
+            // Next, close the ephemeral account to reclaim the rent SOL
+            transaction.add(
+                createCloseAccountInstruction(tokenAta, vaultPublicKey, ephemeralPublicKey)
+            );
+            
+            await sendAndConfirmTransaction(this.connection, transaction, [ephemeralKeypair]);
+            logger.info('Swept SPL token and closed ephemeral token account.', { ephemeralAddress: ephemeralPublicKey.toString() });
+        }
+    } catch (error) {
+        logger.warn('Could not sweep SPL token from ephemeral wallet (might be empty or already closed).', { ephemeralAddress: ephemeralPublicKey.toString(), error: error instanceof Error ? error.message : error });
+    }
+
+    // Sweep Remaining SOL 
+    try {
+        // A small delay to ensure the close account transaction is reflected in the balance
+        await delay(1500); 
+        
+        const solBalance = await this.connection.getBalance(ephemeralPublicKey);
+        const fee = 5000; // Fee for the sweep transaction itself
+        
+        if (solBalance > fee) {
+            const transferAmount = solBalance - fee;
+            const transaction = new Transaction().add(
+                SystemProgram.transfer({
+                    fromPubkey: ephemeralPublicKey,
+                    toPubkey: vaultPublicKey,
+                    lamports: transferAmount,
+                })
+            );
+            await sendAndConfirmTransaction(this.connection, transaction, [ephemeralKeypair]);
+            logger.info('Swept remaining SOL from ephemeral wallet', { ephemeralAddress: ephemeralPublicKey.toString(), amount: lamportsToSol(transferAmount) });
+        }
+    } catch (error) {
+        logger.error('Failed to sweep SOL from ephemeral wallet', { ephemeralAddress: ephemeralPublicKey.toString(), error: error instanceof Error ? error.message : error });
+    } finally {
+        await db.update(ephemeralWallets).set({ status: 'swept' }).where(eq(ephemeralWallets.walletAddress, ephemeralPublicKey.toString()));
+    }
+  }
 
   async getWalletByAddress(address: string): Promise<WalletInfo | null> {
     try {
@@ -317,7 +252,7 @@ export class WalletManagementService {
       }
 
       // Query database
-      const sessions = await db.select().from(userSessions).where(eq(userSessions.mainFundingAddress, address));
+      const sessions = await db.select().from(userSessions).where(eq(userSessions.walletAddress, address));
       
       if (sessions.length === 0) {
         return null;
@@ -490,16 +425,15 @@ export class WalletManagementService {
     }
   }
 
-  async validateWalletFunding(address: string, isPrivileged: boolean = false): Promise<{
+  async validateWalletFunding(address: string, fundingTier: FundingTierName, isPrivileged: boolean = false): Promise<{
     hasSufficientFunding: boolean;
     currentBalance: number;
     requiredAmount: number;
   }> {
     try {
       const currentBalance = await this.getWalletBalance(address);
-      const requiredAmount = isPrivileged 
-        ? TRADING_CONSTANTS.MIN_PRIVILEGED_WALLET_DEPOSIT 
-        : TRADING_CONSTANTS.MIN_WALLET_DEPOSIT;
+      const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
+      const requiredAmount = tierConfig.minFunding;
 
       const hasSufficient = hasSufficientFunding(currentBalance, requiredAmount, isPrivileged);
 
@@ -523,22 +457,13 @@ export class WalletManagementService {
         error: error instanceof Error ? error.message : 'Unknown error'
       });
 
+      const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
       return {
         hasSufficientFunding: false,
         currentBalance: 0,
-        requiredAmount: isPrivileged 
-          ? TRADING_CONSTANTS.MIN_PRIVILEGED_WALLET_DEPOSIT 
-          : TRADING_CONSTANTS.MIN_WALLET_DEPOSIT
+        requiredAmount: tierConfig?.minFunding || TRADING_CONSTANTS.MIN_WALLET_DEPOSIT
       };
     }
-  }
-
-  async getWalletsForSession(sessionId: string): Promise<Keypair[]> {
-    const walletRecords = await db.select().from(sessionWallets).where(eq(sessionWallets.sessionId, sessionId));
-    return walletRecords.map(record => {
-      const secretKey = this.decryptPrivateKey(record.privateKey);
-      return Keypair.fromSecretKey(secretKey);
-    });
   }
 
   async updateWalletBalance(address: string, balance: number): Promise<void> {
@@ -561,10 +486,10 @@ export class WalletManagementService {
           currentBalance: balance.toString(),
           updatedAt: new Date()
         })
-        .where(eq(userSessions.mainFundingAddress, address));
+        .where(eq(userSessions.walletAddress, address));
 
       // Update cache
-     const cachedWallet = this.walletCache.get(address);
+      const cachedWallet = this.walletCache.get(address);
       if (cachedWallet) {
         cachedWallet.balance = balance;
       }

@@ -28,18 +28,19 @@ export interface TradingConfiguration {
   minDeposit: number;
   targetDepletion: number; // 75%
   revenuePercentage: number; // 25%
+  tradingInterval: number; // milliseconds
   maxSlippage: number;
   tradeSize: {
     min: number;
     max: number;
   };
   isPrivileged: boolean;
+  fundingTier: FundingTierName;
 }
 
 export enum SessionStatus {
   CREATED = 'created',
   FUNDING_DETECTED = 'funding_detected',
-  DISTRIBUTING = 'distributing',
   FUNDED = 'funded', 
   TRADING = 'trading',
   PAUSED = 'paused',
@@ -93,4 +94,19 @@ export interface SessionValidationResult {
   errors: string[];
   canTrade: boolean;
   fundingRequired: number;
+}
+
+export type FundingTierName = 'micro' | 'small' | 'standard' | 'high';
+
+export interface FundingTier {
+  name: FundingTierName;
+  minFunding: number;
+  maxFunding: number;
+  buyPercentageMin: number;
+  buyPercentageMax: number;
+  sellPercentageMin: number;
+  sellPercentageMax: number;
+  minBuyUSD?: number;
+  maxBuyUSD: number;
+  description: string;
 }
