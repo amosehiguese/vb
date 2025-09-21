@@ -10,8 +10,6 @@ import {
 import {
   TokenMetadata,
   JupiterTokenInfo,
-  CoinGeckoTokenInfo,
-  RaydiumPoolInfo,
   PoolAnalysis,
 } from '../types/token';
 import {
@@ -34,7 +32,6 @@ import { tokens } from '../db/schema';
 export class TokenValidationService {
   private connection: Connection;
   private jupiterApi: AxiosInstance;
-  private coinGeckoApi: AxiosInstance;
   private dexScreenerApi: AxiosInstance;
 
   constructor() {
@@ -55,15 +52,8 @@ export class TokenValidationService {
         'Content-Type': 'application/json'
       }
     });
-
-    this.coinGeckoApi = axios.create({
-      baseURL: API_CONFIG.COINGECKO.base_url,
-      timeout: API_CONFIG.REQUEST_TIMEOUT,
-      headers: {
-        'Content-Type': 'application/json'
-      }
-    });
   }
+  
 
   async validateToken(contractAddress: string): Promise<TokenValidationResponse> {
     try {
@@ -189,20 +179,6 @@ export class TokenValidationService {
       logger.warn('Failed to get Jupiter metadata', { contractAddress, error });
     }
 
-    // Try CoinGecko as backup
-    if (!metadata.symbol || !metadata.name) {
-      try {
-        await delay(API_CONFIG.COINGECKO.rate_limit_ms); // Rate limiting
-        const coinGeckoData = await this.getCoinGeckoTokenMetadata(contractAddress);
-        if (coinGeckoData) {
-          metadata.symbol = metadata.symbol || coinGeckoData.symbol;
-          metadata.name = metadata.name || coinGeckoData.name;
-        }
-      } catch (error) {
-        logger.warn('Failed to get CoinGecko metadata', { contractAddress, error });
-      }
-    }
-
     if (!metadata.symbol || !metadata.name) {
       try {
         const dexScreenerData = await this.getDexScreenerTokenMetadata(contractAddress);
@@ -296,25 +272,7 @@ export class TokenValidationService {
       return null;
     }
   }
-  
 
-  private async getCoinGeckoTokenMetadata(contractAddress: string): Promise<CoinGeckoTokenInfo | null> {
-    try {
-      const response = await retry(async () => {
-        return await this.coinGeckoApi.get(
-          `${API_CONFIG.COINGECKO.coins_endpoint}/solana/contract/${contractAddress}`
-        );
-      });
-
-      return response.data;
-    } catch (error) {
-      if (axios.isAxiosError(error) && error.response?.status === 404) {
-        return null;
-      }
-      logger.error('CoinGecko API error', { contractAddress, error });
-      return null;
-    }
-  }
 
   private async getTokenSupply(contractAddress: string): Promise<number> {
     try {
@@ -333,8 +291,11 @@ export class TokenValidationService {
     try {
       const dexScreenerPools = await this.getDexScreenerPools(contractAddress);
       pools.push(...dexScreenerPools);
+
+      const jupiterPools = await this.getJupiterPools(contractAddress);
+      pools.push(...jupiterPools);
     } catch (error) {
-      logger.warn('Failed to get DexScreener pools', { contractAddress, error });
+      logger.warn('Failed to get pools', { contractAddress, error });
     }
   
     // Calculate scores for ranking
@@ -344,6 +305,50 @@ export class TokenValidationService {
   
     return pools.sort((a, b) => b.score - a.score);
   }
+
+  private async getJupiterPools(contractAddress: string): Promise<PoolAnalysis[]> {
+    try {
+      const response = await retry(async () => {
+        return await this.jupiterApi.get(
+          `${DEX_CONFIG.JUPITER.tokens_endpoint}/search?query=${contractAddress}`
+        );
+      }, API_CONFIG.MAX_RETRIES, API_CONFIG.RETRY_DELAY_MS);
+  
+      const tokens = response.data || [];
+      if (!Array.isArray(tokens) || tokens.length === 0) {
+        return [];
+      }
+  
+      const token = tokens[0]; 
+
+      // Liquidity and stats come directly from Jupiter response
+      const liquidity = token.liquidity || 0;
+      const volume24h =
+        (token.stats24h?.buyVolume || 0) + (token.stats24h?.sellVolume || 0);
+  
+      const pool: PoolAnalysis = {
+        address: token.firstPool?.id || token.id,
+        dex: 'jupiter',
+        liquidity: liquidity,
+        volume24h: volume24h,
+        priceUsd: token.usdPrice ? parseFloat(token.usdPrice) : 0,
+        verified: Boolean(
+          token.audit?.mintAuthorityDisabled && token.audit?.freezeAuthorityDisabled
+        ),
+        score: 0, 
+        lastUpdated: new Date(),
+      };
+  
+      return [pool];
+    } catch (error) {
+      logger.error('Jupiter API error in getJupiterPools', {
+        contractAddress,
+        error,
+      });
+      return [];
+    }
+  }
+  
 
   private async getDexScreenerPools(contractAddress: string): Promise<PoolAnalysis[]> {
     try {

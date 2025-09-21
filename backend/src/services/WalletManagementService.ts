@@ -28,6 +28,10 @@ export class WalletManagementService {
   private walletCache: Map<string, WalletInfo> = new Map();
   private privilegedWallets: Set<string> = new Set();
 
+  private walletSubscriptions: Map<string, { subscriptionId: number; callback: (balance: number) => void }> = new Map();
+  private subscriptionRetries: Map<string, number> = new Map();
+  private isConnected: boolean = true;
+
   private readonly encryptionKey = crypto.scryptSync(
     env.WALLET_ENCRYPTION_PASSWORD,
     'salt',
@@ -37,6 +41,7 @@ export class WalletManagementService {
   constructor() {
     this.connection = new Connection(env.SOLANA_RPC_URL, 'confirmed');
     this.initializePrivilegedWallets();
+    this.setupConnectionMonitoring();
   }
 
   private initializePrivilegedWallets(): void {
@@ -49,6 +54,46 @@ export class WalletManagementService {
       envPrivilegedWallets.split(',').forEach(address => {
         this.privilegedWallets.add(address.trim());
       });
+    }
+  }
+
+  private setupConnectionMonitoring(): void {
+    // Monitor WebSocket connection status
+    setInterval(() => {
+      try {
+        // Test connection by checking if we can make a simple call
+        this.connection.getSlot().then(() => {
+          if (!this.isConnected) {
+            logger.info('WebSocket connection restored, resubscribing to wallets');
+            this.isConnected = true;
+            this.resubscribeAllWallets();
+          }
+        }).catch(() => {
+          if (this.isConnected) {
+            logger.warn('WebSocket connection lost, will attempt to resubscribe');
+            this.isConnected = false;
+          }
+        });
+      } catch (error) {
+        if (this.isConnected) {
+          logger.error('Connection monitoring error', { error });
+          this.isConnected = false;
+        }
+      }
+    }, 30000); 
+  }
+
+  private async resubscribeAllWallets(): Promise<void> {
+    const walletsToResubscribe = Array.from(this.walletSubscriptions.keys());
+    
+    for (const address of walletsToResubscribe) {
+      const subscription = this.walletSubscriptions.get(address);
+      if (subscription) {
+        logger.info('Resubscribing to wallet', { address });
+        // Remove old subscription and create new one
+        await this.stopWalletMonitoring(address);
+        await this.monitorWalletBalance(address, subscription.callback);
+      }
     }
   }
 
@@ -341,37 +386,134 @@ export class WalletManagementService {
   }
 
   async monitorWalletBalance(address: string, callback: (balance: number) => void): Promise<void> {
+    try {
+      // Check if already monitoring this address
+      if (this.walletSubscriptions.has(address)) {
+        logger.warn('Wallet already being monitored, stopping previous subscription', { address });
+        await this.stopWalletMonitoring(address);
+      }
+
+      const publicKey = new PublicKey(address);
+
+      // Initial balance check
+      const initialBalance = await this.getWalletBalance(address);
+      callback(initialBalance);
+
+      // Set up WebSocket subscription for real-time updates
+      const subscriptionId = this.connection.onAccountChange(
+        publicKey,
+        (accountInfo, context) => {
+          try {
+            const balance = lamportsToSol(accountInfo.lamports);
+            
+            // Update cache
+            const cachedWallet = this.walletCache.get(address);
+            if (cachedWallet) {
+              cachedWallet.balance = balance;
+            }
+
+            logger.debug('Wallet balance changed via WebSocket', { 
+              address, 
+              balance, 
+              slot: context.slot 
+            });
+
+            callback(balance);
+            
+            // Reset retry counter on successful update
+            this.subscriptionRetries.delete(address);
+          } catch (error) {
+            logger.error('Error processing wallet balance change', { address, error });
+          }
+        },
+        'confirmed'
+      );
+
+      // Store subscription info
+      this.walletSubscriptions.set(address, { subscriptionId, callback });
+      this.subscriptionRetries.delete(address); // Reset retry counter
+
+      logger.info('Started WebSocket wallet balance monitoring', { 
+        address, 
+        subscriptionId 
+      });
+
+    } catch (error) {
+      logger.error('Failed to start wallet monitoring', { address, error });
+      
+      // Implement fallback with exponential backoff
+      const retryCount = this.subscriptionRetries.get(address) || 0;
+      if (retryCount < 3) {
+        this.subscriptionRetries.set(address, retryCount + 1);
+        const retryDelay = Math.pow(2, retryCount) * 5000; // 5s, 10s, 20s
+        
+        logger.info('Retrying wallet monitoring subscription', { 
+          address, 
+          retryCount: retryCount + 1, 
+          retryDelay 
+        });
+        
+        setTimeout(() => {
+          this.monitorWalletBalance(address, callback);
+        }, retryDelay);
+      } else {
+        logger.error('Max retry attempts reached for wallet monitoring', { address });
+        // Could implement polling fallback here if needed
+        this.fallbackToPolling(address, callback);
+      }
+    }
+  }
+
+  private async fallbackToPolling(address: string, callback: (balance: number) => void): Promise<void> {
+    logger.warn('Falling back to polling for wallet monitoring', { address });
+    
     const checkBalance = async () => {
       try {
         const balance = await this.getWalletBalance(address);
         callback(balance);
       } catch (error) {
-        logger.error('Error monitoring wallet balance', { address, error });
+        logger.error('Error in polling fallback', { address, error });
       }
     };
 
-    // Initial check
-    await checkBalance();
+    // Use longer intervals for polling fallback to reduce RPC calls
+    const intervalId = setInterval(checkBalance, TRADING_CONSTANTS.WALLET_BALANCE_CHECK_INTERVAL * 3);
 
-    // Set up periodic monitoring
-    const intervalId = setInterval(checkBalance, TRADING_CONSTANTS.WALLET_BALANCE_CHECK_INTERVAL);
-
-    // Store interval ID for cleanup
+    // Store as fallback monitoring
     (global as any).walletMonitorIntervals = (global as any).walletMonitorIntervals || new Map();
     (global as any).walletMonitorIntervals.set(address, intervalId);
 
-    logger.info('Started wallet balance monitoring', { address });
+    logger.info('Started polling fallback for wallet monitoring', { address });
   }
 
   async stopWalletMonitoring(address: string): Promise<void> {
-    const intervals = (global as any).walletMonitorIntervals;
-    if (intervals && intervals.has(address)) {
-      clearInterval(intervals.get(address));
-      intervals.delete(address);
-      logger.info('Stopped wallet balance monitoring', { address });
+    try {
+      // Stop WebSocket subscription
+      const subscription = this.walletSubscriptions.get(address);
+      if (subscription) {
+        await this.connection.removeAccountChangeListener(subscription.subscriptionId);
+        this.walletSubscriptions.delete(address);
+        logger.info('Stopped WebSocket wallet monitoring', { 
+          address, 
+          subscriptionId: subscription.subscriptionId 
+        });
+      }
+
+      // Stop polling fallback if exists
+      const intervals = (global as any).walletMonitorIntervals;
+      if (intervals && intervals.has(address)) {
+        clearInterval(intervals.get(address));
+        intervals.delete(address);
+        logger.info('Stopped polling fallback monitoring', { address });
+      }
+
+      // Clean up retry tracking
+      this.subscriptionRetries.delete(address);
+
+    } catch (error) {
+      logger.error('Error stopping wallet monitoring', { address, error });
     }
   }
-
 
   async transferRevenue(sessionWallet: WalletInfo, totalFundedAmount: number): Promise<{ success: boolean; signature?: string; revenueAmount: number }> {
     try {

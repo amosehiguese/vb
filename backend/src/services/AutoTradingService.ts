@@ -231,11 +231,25 @@ export class AutoTradingService {
     const session = await this.getSessionFromDatabase(sessionId);
     if (!session) { await this.stopAutoTrading(sessionId, 'Session not found'); return false; }
 
+    // Check trade count before executing
+    const currentTradeCount = await this.getTradeCount(sessionId);
+    const fundingTier = session.fundingTier || 'standard';
+    const maxTrades = TRADING_CONSTANTS.MAX_TRADES_PER_SESSION[fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.MAX_TRADES_PER_SESSION];
+
+    if (currentTradeCount >= maxTrades) {
+      logger.info('Maximum trade count reached - completing session', {
+        sessionId,
+        currentTradeCount,
+        maxTrades
+      });
+      await this.completeSession(sessionId);
+      return false;
+    }
+
     const vaultWallet = await this.walletManagementService.getWalletByAddress(session.walletAddress);
     if (!vaultWallet || !vaultWallet.keypair) { logger.error('Vault keypair not found', { sessionId }); return false; }
 
     try {
-        // Depletion Check
         const vaultBalance = await this.walletManagementService.getWalletBalance(vaultWallet.address);
         logger.debug('Trading cycle started', {
           sessionId,
@@ -248,17 +262,13 @@ export class AutoTradingService {
 
         const initialTradingBalance = parseFloat(session.initialBalance || '0'); 
         if (initialTradingBalance > 0) {
-          const currentDepletionPercentage = calculateDepletionPercentage(initialTradingBalance, vaultBalance);
-  
-          if (currentDepletionPercentage >= TRADING_CONSTANTS.TRADING_BALANCE_DEPLETION_TARGET) {
-            logger.info('Target depletion reached - trading balance fully depleted', {
+          const minimumViableBalance = TRADING_CONSTANTS.MIN_TRADE_SOL; 
+          if (vaultBalance < minimumViableBalance) {
+            logger.info('Minimum viable balance reached - completing session', {
               sessionId,
-              initialTradingBalance,
-              currentBalance: vaultBalance, 
-              depletionPercentage: currentDepletionPercentage.toFixed(2) + '%',
-              target: '100%' 
+              vaultBalance: vaultBalance.toFixed(6),
+              minimumRequired: minimumViableBalance
             });
-            
             await this.completeSession(sessionId);
             return false;
           }
@@ -269,7 +279,7 @@ export class AutoTradingService {
 
         if (nextTradeType === TradeType.BUY) {
           // Check if we have enough SOL for minimum buy before creating ephemeral wallet
-          const minBuyAmount = 0.001;
+          const minBuyAmount = TRADING_CONSTANTS.MIN_TRADE_SOL;
           const requiredForBuy = minBuyAmount + TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER + TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
           
           if (vaultBalance < requiredForBuy) {
@@ -362,7 +372,7 @@ export class AutoTradingService {
       });
       
       // Try with minimum possible trade size
-      const minimumTradeSize = 0.001; // 0.001 SOL minimum
+      const minimumTradeSize = TRADING_CONSTANTS.MIN_TRADE_SOL; // 0.001 SOL minimum
       const minimumTotalNeeded = minimumTradeSize + TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER + TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
       
       if (vaultBalance < minimumTotalNeeded) {
@@ -438,15 +448,15 @@ export class AutoTradingService {
     const finalUsdValue = solAmount * solPrice;
     const actualPercentageUsed = (solAmount / vaultBalance) * 100;
     
-    logger.debug('Tier-based buy trade size calculated', {
+    logger.debug('buy size calculated', {
       sessionId,
       fundingTier,
-      vaultBalance: vaultBalance.toFixed(6),
-      targetPercentage: randomPercentage.toFixed(1),
-      solAmount: solAmount.toFixed(6),
-      usdValue: finalUsdValue.toFixed(2),
-      actualPercentage: actualPercentageUsed.toFixed(1),
-      tierLimits: `${minBuyUSD || 'none'}-${tierConfig.maxBuyUSD} USD`
+      vaultBalance: vaultBalance.toFixed(9),      // More decimal places
+      targetPercentage: randomPercentage.toFixed(3),
+      solAmount: solAmount.toFixed(9),
+      usdValue: finalUsdValue.toFixed(4),         // More precision
+      actualPercentage: actualPercentageUsed.toFixed(3),
+      tierLimits: `$${minBuyUSD || 0.01}-${tierConfig.maxBuyUSD}`
     });
     
     return {
