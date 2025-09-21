@@ -18,11 +18,22 @@ export class SessionController {
 
   createSession = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
+      console.log('Raw request body:', req.body); // Add this line
+      console.log('Request body keys:', Object.keys(req.body)); // Add this line
+      
       const { contractAddress, tokenSymbol, fundingTierName } = req.body;
+      
+      console.log('Extracted values:', { // Add this line
+        contractAddress,
+        tokenSymbol, 
+        fundingTierName,
+        fundingTierNameType: typeof fundingTierName
+      });
 
       logger.info('Session creation request received', { 
         contractAddress,
         tokenSymbol,
+        fundingTierName,
         ip: req.ip,
         userAgent: req.get('User-Agent')
       });

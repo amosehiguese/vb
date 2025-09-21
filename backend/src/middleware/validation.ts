@@ -1,7 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import { z, ZodError } from 'zod';
 import { logger } from '../config/logger';
-import { HTTP_STATUS, ERROR_CODES } from '../utils/constants';
+import { HTTP_STATUS, ERROR_CODES, TRADING_CONSTANTS } from '../utils/constants';
 import { isValidSolanaAddress, isValidTokenSymbol } from '../utils/helpers';
 
 // Custom Zod refinements
@@ -14,6 +14,15 @@ const tokenSymbolSchema = z.string().optional().refine(
   { message: 'Invalid token symbol format' }
 );
 
+const fundingTierSchema = z.string().min(1, "Funding tier name is required")
+  .refine(
+    (tier) => {
+      const validTiers = Object.keys(TRADING_CONSTANTS.FUNDING_TIERS);
+      return validTiers.includes(tier.toUpperCase());
+    },
+    { message: 'Invalid funding tier name' }
+  );
+
 // Request validation schemas
 export const validateTokenRequestSchema = z.object({
   contractAddress: solanaAddressSchema
@@ -21,7 +30,8 @@ export const validateTokenRequestSchema = z.object({
 
 export const createSessionRequestSchema = z.object({
   contractAddress: solanaAddressSchema,
-  tokenSymbol: tokenSymbolSchema
+  tokenSymbol: tokenSymbolSchema,
+  fundingTierName: fundingTierSchema
 });
 
 // Generic validation middleware factory
