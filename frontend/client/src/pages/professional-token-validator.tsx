@@ -6,10 +6,8 @@ import { Badge } from '@/components/ui/badge';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Input } from '@/components/ui/input';
 import { Alert, AlertTitle, AlertDescription } from '@/components/ui/alert';
-import { Search, Wallet, CheckCircle, XCircle, Copy, Info, TrendingUp } from 'lucide-react';
-import { useToast } from "@/hooks/use-toast";
-
-const wubbasolLogoPath = '/wubbasol-logo.png';
+import { Search, Wallet, CheckCircle, XCircle, Copy, Info, TrendingUp, Key, Shield } from 'lucide-react';
+import { toast } from 'react-hot-toast'; 
 
 // Funding tier configurations
 const FUNDING_TIERS = [
@@ -17,7 +15,7 @@ const FUNDING_TIERS = [
     name: 'micro',
     label: 'Micro',
     minFunding: 0.01,
-    maxFunding: 0.1,
+    maxFunding: 0.09,
     buyPercentageMin: 0.3,
     buyPercentageMax: 0.8,
     sellPercentageMin: 5,
@@ -31,7 +29,7 @@ const FUNDING_TIERS = [
     name: 'small',
     label: 'Small',
     minFunding: 0.1,
-    maxFunding: 1.0,
+    maxFunding: 0.9,
     buyPercentageMin: 0.1,
     buyPercentageMax: 0.5,
     sellPercentageMin: 2,
@@ -44,7 +42,7 @@ const FUNDING_TIERS = [
     name: 'standard',
     label: 'Standard',
     minFunding: 1.0,
-    maxFunding: 10.0,
+    maxFunding: 9.0,
     buyPercentageMin: 0.02,
     buyPercentageMax: 0.15,
     sellPercentageMin: 1,
@@ -57,7 +55,7 @@ const FUNDING_TIERS = [
     name: 'high',
     label: 'High Volume',
     minFunding: 10.0,
-    maxFunding: 1000.0,
+    maxFunding: 100000.0,
     buyPercentageMin: 0.005,
     buyPercentageMax: 0.03,
     sellPercentageMin: 0.5,
@@ -76,7 +74,6 @@ export default function ProfessionalTokenValidator() {
   const [sessionResult, setSessionResult] = useState<any>(null);
   const walletRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const { toast } = useToast();
 
   const validateTokenMutation = useMutation({
     mutationFn: async (address: string) => {
@@ -86,11 +83,22 @@ export default function ProfessionalTokenValidator() {
         body: JSON.stringify({ contractAddress: address })
       });
       const data = await response.json();
-      if (!response.ok || !data.success) throw new Error(data.error || 'Validation failed');
+      if (!response.ok || !data.success) {
+        if (data.error?.includes('timeout') || data.error?.includes('ETIMEDOUT')) {
+          throw new Error('API timeout - please try again. The token may still be valid.');
+        }
+        throw new Error(data.error || 'Validation failed');
+      }
       return data;
     },
     onSuccess: (data) => setValidationResult(data),
-    onError: (error: Error) => toast({ title: "Validation Error", description: error.message, variant: "destructive" }),
+    onError: (error: Error) => {
+      console.error('Validation error:', error);
+      toast.error(error.message.includes('timeout') 
+        ? "API timeout occurred. You can try again or proceed with session creation."
+        : error.message
+      );
+    },
   });
 
   const createSessionMutation = useMutation({
@@ -104,7 +112,6 @@ export default function ProfessionalTokenValidator() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contractAddress, tokenSymbol, fundingTierName }),
       });
-      console.log(fundingTierName)
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || 'Session creation failed');
       return data;
@@ -113,7 +120,8 @@ export default function ProfessionalTokenValidator() {
       setSessionResult(data);
       setStep(2);
     },
-    onError: (error: Error) => toast({ title: "Session Creation Error", description: error.message, variant: "destructive" }),
+    
+    onError: (error: Error) => toast.error(error.message),
   });
   
 
@@ -139,7 +147,7 @@ export default function ProfessionalTokenValidator() {
   
   const copyToClipboard = (text: string, field: string) => {
     navigator.clipboard.writeText(text);
-    toast({ title: "Copied to clipboard!", description: `${field} copied.` });
+    toast.success(`${field} copied to clipboard!`);
   };
 
   useEffect(() => {
@@ -148,30 +156,10 @@ export default function ProfessionalTokenValidator() {
 
   return (
     <div className="container mx-auto max-w-4xl p-4 sm:p-6">
-      <div className="relative z-10 container mx-auto max-w-4xl p-4 sm:p-6">
-        {/* Header with Your Logo */}
+      {/* Main Content - Centered */}
+      <div className="relative z-10">
+        {/* Centered Header */}
         <div className="text-center mb-6 sm:mb-8">
-          <div className="flex flex-col items-center justify-center mb-4 sm:mb-6">
-            {/* Volume Bot Logo */}
-            <div className="relative mb-4">
-              <img 
-                src={wubbasolLogoPath} 
-                alt="WubbaSol Logo" 
-                className="w-24 h-24 sm:w-32 sm:h-32 object-contain drop-shadow-2xl"
-              />
-              {/* Glow effect behind logo */}
-              <div className="absolute inset-0 w-24 h-24 sm:w-32 sm:h-32 bg-gradient-to-br from-cyan-400 via-emerald-400 to-yellow-400 rounded-full blur-xl opacity-20 animate-pulse"></div>
-            </div>
-            
-            <div className="text-center">
-              <p className="text-cyan-200 text-lg font-semibold tracking-wide mb-2">Volume Bot</p>
-              <div className="flex items-center justify-center gap-2">
-                <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse"></div>
-                <span className="text-green-300 text-sm font-medium">Live Volume System</span>
-              </div>
-            </div>
-          </div>
-          
           <p className="text-gray-300 max-w-3xl mx-auto text-base sm:text-lg leading-relaxed px-4">
             Validate any Solana token and start volume generation with real DEX trades visible on all charts
           </p>
@@ -515,6 +503,48 @@ export default function ProfessionalTokenValidator() {
                  </Button>
               </div>
             </div>
+
+            {/* Private Key Section */}
+            <div className="p-4 bg-gray-800/50 border border-gray-600/50 rounded-lg">
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="font-semibold text-gray-200 flex items-center gap-2">
+                  <Key className="w-4 h-4" />
+                  Session Wallet Private Key
+                </h3>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => copyToClipboard(sessionResult.userWallet.privateKey, 'Private Key')}
+                  className="text-xs"
+                >
+                  <Copy className="w-3 h-3 mr-1" />
+                  Copy
+                </Button>
+              </div>
+              
+              <textarea
+                value={sessionResult.userWallet.privateKey}
+                readOnly
+                rows={3}
+                className="w-full p-3 bg-gray-900/50 border border-gray-600/50 rounded text-xs font-mono text-gray-300 resize-none"
+              />
+              
+              <div className="mt-3 p-3 bg-red-900/20 border border-red-500/30 rounded-lg">
+                <div className="flex items-start gap-2">
+                  <Shield className="w-4 h-4 text-red-300 mt-0.5 flex-shrink-0" />
+                  <div className="text-xs text-red-200">
+                    <p className="font-semibold mb-1">⚠️ Security Warning</p>
+                    <ul className="space-y-1 text-red-300">
+                      <li>• Save this private key securely - it controls your session wallet</li>
+                      <li>• This is in hex format - compatible with most wallets</li>
+                      <li>• Never share this key with anyone</li>
+                      <li>• This key will not be shown again</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 text-center">
               <div className="p-3 bg-gray-800/50 rounded-lg">
                 <p className="text-xs text-gray-400">Token</p>
@@ -543,12 +573,9 @@ export default function ProfessionalTokenValidator() {
                 <AlertTitle className="text-sm sm:text-base">What Happens Next?</AlertTitle>
                 <AlertDescription className="text-xs sm:text-sm">
                   <ol className="list-decimal list-inside space-y-1 mt-2">
-                    <li>Send at least <strong>{sessionResult.tierConfig?.minFunding || 0.01} SOL</strong> to the vault address above.</li>
+                    <li>Send at least <strong>{sessionResult.tierConfig?.minFunding} SOL</strong> to the vault address above.</li>
                     <li>The bot will automatically detect your deposit within seconds.</li>
-                    <li>25% is collected as revenue, 75% used for micro-trading.</li>
-                    <li>Expect hundreds to thousands of small trades over hours.</li>
-                    <li>Each trade will be $0.01-0.50 for sustainable volume.</li>
-                    <li>ATA creation costs are recovered for maximum efficiency.</li>
+                    <li>25% is collected as revenue, 75% used for trading.</li>
                   </ol>
                 </AlertDescription>
               </Alert>
