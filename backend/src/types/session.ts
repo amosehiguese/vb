@@ -18,6 +18,7 @@ export interface SessionConfig {
   tradingConfig: TradingConfiguration;
   autoTradingEnabled: boolean;
   status: SessionStatus;
+  fundingTier: FundingTierName;
   createdAt: Date;
   updatedAt: Date;
   fundedAt?: Date;
@@ -102,8 +103,6 @@ export interface FundingTier {
   name: FundingTierName;
   minFunding: number;
   maxFunding: number;
-  buyPercentageMin: number;
-  buyPercentageMax: number;
   sellPercentageMin: number;
   sellPercentageMax: number;
   minBuyUSD?: number;

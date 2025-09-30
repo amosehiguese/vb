@@ -1,5 +1,6 @@
-import { Connection, PublicKey } from '@solana/web3.js';
+import { Connection, ConnectionConfig, PublicKey } from '@solana/web3.js';
 import axios, { AxiosInstance } from 'axios';
+import fetch from 'node-fetch'; 
 import { logger } from '../config/logger';
 import { env } from '../config/environment';
 import { 
@@ -17,7 +18,7 @@ import {
   hasMinimumLiquidity,
   calculatePoolScore,
   retry,
-  delay
+  sanitizeErrorMessage,
 } from '../utils/helpers';
 import { 
   DEX_CONFIG, 
@@ -35,7 +36,12 @@ export class TokenValidationService {
   private dexScreenerApi: AxiosInstance;
 
   constructor() {
-    this.connection = new Connection(env.SOLANA_RPC_URL, 'confirmed');
+    const connectionConfig: ConnectionConfig = {
+      commitment: 'confirmed',
+      fetch: fetch as any,
+    };
+    
+    this.connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
 
     this.dexScreenerApi = axios.create({
       baseURL: DEX_CONFIG.DEXSCREENER.api_url,
@@ -65,7 +71,29 @@ export class TokenValidationService {
       }
 
       // Check if token exists on blockchain
-      const tokenExists = await this.checkTokenExists(contractAddress);
+      let tokenExists: boolean;
+      try {
+        tokenExists = await this.checkTokenExists(contractAddress);
+      } catch (error) {
+        // If we can't verify existence due to RPC issues, return a specific error
+        logger.error('RPC connection failed during token validation', {
+          contractAddress,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+        
+        return {
+          success: false,
+          valid: false,
+          contractAddress,
+          token: { symbol: '', name: '', decimals: 0, supply: '0' },
+          primaryDex: '',
+          liquidityUsd: 0,
+          pools: [],
+          bestPool: { address: '', dex: '', liquidity: 0, volume24h: 0, priceUsd: 0, reason: '' },
+          error: 'Unable to connect to Solana network. Please try again in a moment.'
+        };
+      }
+  
       if (!tokenExists) {
         return this.createErrorResponse(
           contractAddress,
@@ -148,14 +176,49 @@ export class TokenValidationService {
   }
 
   private async checkTokenExists(contractAddress: string): Promise<boolean> {
-    try {
-      const publicKey = new PublicKey(contractAddress);
-      const accountInfo = await this.connection.getAccountInfo(publicKey);
-      return accountInfo !== null;
-    } catch (error) {
-      logger.error('Error checking token existence', { contractAddress, error });
-      return false;
+    const maxRetries = 3;
+    let lastError: Error | null = null;
+  
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const publicKey = new PublicKey(contractAddress);
+        const accountInfo = await this.connection.getAccountInfo(publicKey);
+        
+        if (attempt > 1) {
+          logger.info('Token existence check succeeded after retry', { 
+            contractAddress, 
+            attempt,
+            exists: accountInfo !== null 
+          });
+        }
+        
+        return accountInfo !== null;
+        
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error('Unknown error');
+        
+        if (attempt < maxRetries) {
+          const delay = 1000 * attempt;
+          logger.warn(`Token existence check failed, retrying in ${delay}ms`, {
+            contractAddress,
+            attempt,
+            error: sanitizeErrorMessage(lastError), // ← Sanitize here
+            nextAttempt: attempt + 1
+          });
+          
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
     }
+  
+    // All retries failed
+    logger.error('Token existence check failed after all retries', {
+      contractAddress,
+      error: sanitizeErrorMessage(lastError), // ← And here
+      attempts: maxRetries
+    });
+  
+    throw new Error(`Unable to verify token existence after ${maxRetries} attempts: ${sanitizeErrorMessage(lastError)}`);
   }
 
   private async getTokenMetadata(contractAddress: string): Promise<TokenMetadata> {

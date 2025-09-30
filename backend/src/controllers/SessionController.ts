@@ -18,22 +18,15 @@ export class SessionController {
 
   createSession = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
-      console.log('Raw request body:', req.body); // Add this line
-      console.log('Request body keys:', Object.keys(req.body)); // Add this line
+      const { contractAddress, tokenSymbol, fundingTierName, tokenName, primaryDex, decimals } = req.body;
       
-      const { contractAddress, tokenSymbol, fundingTierName } = req.body;
-      
-      console.log('Extracted values:', { // Add this line
-        contractAddress,
-        tokenSymbol, 
-        fundingTierName,
-        fundingTierNameType: typeof fundingTierName
-      });
-
       logger.info('Session creation request received', { 
         contractAddress,
         tokenSymbol,
         fundingTierName,
+        tokenName,
+        primaryDex,
+        decimals,
         ip: req.ip,
         userAgent: req.get('User-Agent')
       });
@@ -42,6 +35,9 @@ export class SessionController {
       const result: SessionCreationResponse = await this.sessionManagementService.createSession(
         contractAddress, 
         fundingTierName,
+        tokenName, 
+        primaryDex, 
+        decimals,
         tokenSymbol,
       );
       
@@ -278,25 +274,45 @@ export class SessionController {
   validateSession = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
       const { sessionId } = req.params;
+      const { operation } = req.query; // 'pause', 'resume', or 'stop'
       
       if (!sessionId) {
         return next(createError.validation('Session ID is required'));
       }
 
-      logger.debug('Session validation request', { sessionId });
+      if (!operation || !['pause', 'resume', 'stop'].includes(operation as string)) {
+        return next(createError.validation('Valid operation (pause, resume, stop) is required'));
+      }
 
-      // Validate session
-      const validation = await this.sessionManagementService.validateSession(sessionId);
+      logger.debug('Session operation validation request', { sessionId, operation });
+
+      const validation = await this.autoTradingService.validateSessionForOperation(
+        sessionId, 
+        operation as 'pause' | 'resume' | 'stop'
+      );
 
       res.status(HTTP_STATUS.OK).json({
         success: true,
         sessionId,
-        validation
+        operation,
+        validation: {
+          canProceed: validation.canProceed,
+          currentBalance: validation.currentBalance,
+          sessionStatus: validation.session?.status,
+          ...(validation.validationError && {
+            error: {
+              message: validation.validationError.message,
+              code: validation.validationError.code,
+              details: validation.validationError.details
+            }
+          })
+        }
       });
 
     } catch (error) {
-      logger.error('Session validation error', {
+      logger.error('Session operation validation error', {
         sessionId: req.params?.sessionId,
+        operation: req.query?.operation,
         error: error instanceof Error ? error.message : 'Unknown error'
       });
 

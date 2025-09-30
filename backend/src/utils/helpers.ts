@@ -73,6 +73,21 @@ export function calculatePercentage(value: number, total: number): number {
   return (value / total) * 100;
 }
 
+export function sanitizeErrorMessage(error: any): string {
+  if (!error) return 'Unknown error';
+  
+  let message = error.message || error.toString();
+  
+  // Remove API keys from error messages
+  message = message
+    .replace(/api-key=[^&\s)]+/gi, 'api-key=***')
+    .replace(/apikey=[^&\s)]+/gi, 'apikey=***')
+    .replace(/key=[^&\s)]+/gi, 'key=***')
+    .replace(/token=[^&\s)]+/gi, 'token=***');
+  
+  return message;
+}
+
 /**
  * Calculates depletion percentage based on initial and current balance
  */

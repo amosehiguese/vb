@@ -7,13 +7,11 @@ import {
   SessionStatus,
   TradingConfiguration,
   SessionValidationResult,
-  FundingTierName,
-  FundingTier
+  FundingTierName
 } from '../types/session';
 import {
   SessionCreationResponse,
   TradingInstruction,
-  AutoTradingConfig
 } from '../types/api';
 import {
   generateSessionId,
@@ -30,7 +28,6 @@ export class SessionManagementService {
   private tokenValidationService: TokenValidationService;
   private walletManagementService: WalletManagementService;
   private autoTradingService: AutoTradingService;
-  private fundingCheckCooldowns: Map<string, number> = new Map();
 
   constructor() {
     this.tokenValidationService = new TokenValidationService();
@@ -38,16 +35,9 @@ export class SessionManagementService {
     this.autoTradingService = new AutoTradingService();
   }
 
-  async createSession(contractAddress: string, fundingTierName: string, tokenSymbol?: string): Promise<SessionCreationResponse> {
+  async createSession(contractAddress: string, fundingTierName: string, tokenName: string, primaryDex: string, decimals: number,  tokenSymbol?: string): Promise<SessionCreationResponse> {
     try {
-      logger.info('Creating new trading session', { contractAddress, tokenSymbol, fundingTierName });
-
-      // Validate token first
-      const tokenValidation = await this.tokenValidationService.validateToken(contractAddress);
-      
-      if (!tokenValidation.valid) {
-        throw createError.validation('Token validation failed');
-      }
+      logger.info('Creating new trading session', { contractAddress, tokenSymbol, fundingTierName, tokenName, primaryDex, decimals });
 
       // Validate funding tier access
       const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[fundingTierName.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
@@ -71,10 +61,11 @@ export class SessionManagementService {
       const sessionData: SessionConfig = {
         sessionId,
         contractAddress,
-        tokenSymbol: tokenSymbol || tokenValidation.token.symbol,
+        tokenSymbol: tokenSymbol || 'Unknown',
         wallet,
         tradingConfig,
         autoTradingEnabled: true,
+        fundingTier: tierConfig.name,
         status: SessionStatus.CREATED,
         createdAt: new Date(),
         updatedAt: new Date()
@@ -98,7 +89,7 @@ export class SessionManagementService {
         },
         userWallet: {
           address: wallet.address,
-          privateKey: wallet.privateKey // Encrypted private key for client
+          privateKey: Buffer.from(this.walletManagementService.decryptPrivateKey(wallet.privateKey)).toString('hex'),
         },
         fundingTier: tierConfig.name,
         tierConfig: {
@@ -109,11 +100,11 @@ export class SessionManagementService {
         },
         token: {
           contractAddress,
-          symbol: tokenValidation.token.symbol,
-          name: tokenValidation.token.name,
-          decimals: tokenValidation.token.decimals
+          symbol: tokenSymbol || "Unknown",
+          name: tokenName,
+          decimals: decimals
         },
-        primaryDex: tokenValidation.primaryDex,
+        primaryDex: primaryDex,
         instructions: instructions,
         estimatedTrades: this.estimateTradeCount(tradingConfig),
         createdAt: sessionData.createdAt
@@ -179,6 +170,7 @@ export class SessionManagementService {
         tokenSymbol: session.tokenSymbol || '',
         wallet,
         tradingConfig,
+        fundingTier: tierConfig.name,
         autoTradingEnabled: session.autoTradingActive || false,
         status: session.status as SessionStatus || SessionStatus.CREATED,
         createdAt: session.createdAt || new Date(),
@@ -322,6 +314,7 @@ export class SessionManagementService {
         contractAddress: sessionData.contractAddress,
         tokenSymbol: sessionData.tokenSymbol,
         lastTradeType: null, 
+        fundingTier: sessionData.fundingTier,
         status: sessionData.status,
         isPrivileged: sessionData.tradingConfig.isPrivileged,
         autoTradingActive: sessionData.autoTradingEnabled,
@@ -364,72 +357,121 @@ export class SessionManagementService {
     }
   }
 
+
   private async handleFundingDetection(sessionId: string, balance: number): Promise<void> {
     try {
-      const session = await this.getSession(sessionId);
-      // If session not found or already processed, do nothing.
-      if (!session) return;
-      
-      // Run the expensive detection logic if the session is still in the 'created' state.
-      if (session.status === SessionStatus.CREATED) {
+      // Use a database transaction to prevent race conditions
+      const result = await db.transaction(async (tx) => {
+        // Check and update status atomically
+        const sessions = await tx.select()
+          .from(userSessions)
+          .where(eq(userSessions.sessionId, sessionId))
+          .limit(1);
         
-        // Detect funding source and update privilege status
-        await this.walletManagementService.updateSessionPrivilegeStatus(sessionId, session.wallet.address);
-        
-        // Get updated session with new privilege status
-        const updatedSession = await this.getSession(sessionId);
-        if (!updatedSession) return;
-    
-        const validation = await this.walletManagementService.validateWalletFunding(
-          session.wallet.address,
-          session.tradingConfig.fundingTier,
-          updatedSession.tradingConfig.isPrivileged
-        );
-    
-        if (validation.hasSufficientFunding) {
-          const totalFundedAmount = validation.currentBalance;
-    
-          // Transfer 25% revenue immediately upon funding
-          const revenueTransfer = await this.walletManagementService.transferRevenue(
-            session.wallet, 
-            totalFundedAmount
-          );
-    
-          if (revenueTransfer.success) {
-            // Calculate remaining balance for trading (75% of original)
-            const tradingBalance = totalFundedAmount - revenueTransfer.revenueAmount;
-    
-            // Update session with both initial amount and trading balance
-            await this.updateSessionStatus(sessionId, SessionStatus.FUNDED, {
-              fundedAt: new Date(),
-              initialBalance: tradingBalance,
-              balance: tradingBalance, // This is the 75% that will be used for trading
-              initialFundedAmount: totalFundedAmount,
-              revenueTransferred: revenueTransfer.revenueAmount,
-              revenueSignature: revenueTransfer.signature
-            });
-    
-            // Start trading with the remaining 75%
-            await this.autoTradingService.startAutoTrading(sessionId);
-    
-            logger.info('Funding processed: Revenue transferred, trading started', {
-              sessionId,
-              totalFunded: totalFundedAmount,
-              revenueTransferred: revenueTransfer.revenueAmount,
-              tradingBalance,
-              revenueSignature: revenueTransfer.signature,
-              isPrivileged: updatedSession.tradingConfig.isPrivileged
-            });
-          } else {
-            logger.error('Failed to transfer revenue', { sessionId, error: revenueTransfer.success });
-          }
+        if (sessions.length === 0) {
+          return { shouldProcess: false, session: null };
         }
+        
+        const session = sessions[0];
+        
+        // Only process if status is exactly 'created'
+        if (session.status !== SessionStatus.CREATED) {
+          logger.debug('Skipping funding detection - session already processed', {
+            sessionId,
+            currentStatus: session.status,
+            balance
+          });
+          return { shouldProcess: false, session: null };
+        }
+        
+        // Immediately update status to 'processing' to prevent double processing
+        await tx.update(userSessions)
+          .set({ 
+            status: 'processing', // Temporary status
+            updatedAt: new Date()
+          })
+          .where(eq(userSessions.sessionId, sessionId));
+        
+        return { shouldProcess: true, session };
+      });
+      
+      if (!result.shouldProcess || !result.session) {
+        return;
       }
+
+      // Get the full session object
+      const session = await this.getSession(sessionId);
+      if (!session) return;
+
+      // Detect funding source and update privilege status
+      await this.walletManagementService.updateSessionPrivilegeStatus(sessionId, session.wallet.address);
+      
+      // Get updated session with new privilege status
+      const updatedSession = await this.getSession(sessionId);
+      if (!updatedSession) return;
+
+      const validation = await this.walletManagementService.validateWalletFunding(
+        session.wallet.address,
+        session.tradingConfig.fundingTier,
+        updatedSession.tradingConfig.isPrivileged
+      );
+
+      if (validation.hasSufficientFunding) {
+        const totalFundedAmount = validation.currentBalance;
+
+        // Transfer 25% revenue immediately upon funding
+        const revenueTransfer = await this.walletManagementService.transferRevenue(
+          session.wallet, 
+          totalFundedAmount
+        );
+
+        if (revenueTransfer.success) {
+          // Calculate remaining balance for trading (75% of original)
+          const tradingBalance = totalFundedAmount - revenueTransfer.revenueAmount;
+
+          // Update session to FUNDED status
+          await this.updateSessionStatus(sessionId, SessionStatus.FUNDED, {
+            fundedAt: new Date(),
+            initialBalance: tradingBalance,
+            balance: tradingBalance,
+            initialFundedAmount: totalFundedAmount,
+            revenueTransferred: revenueTransfer.revenueAmount,
+            revenueSignature: revenueTransfer.signature
+          });
+
+          // Start trading with the remaining 75%
+          await this.autoTradingService.startAutoTrading(sessionId);
+
+          logger.info('Funding processed: Revenue transferred, trading started', {
+            sessionId,
+            totalFunded: totalFundedAmount,
+            revenueTransferred: revenueTransfer.revenueAmount,
+            tradingBalance,
+            revenueSignature: revenueTransfer.signature,
+            isPrivileged: updatedSession.tradingConfig.isPrivileged
+          });
+        } else {
+          // If revenue transfer failed, revert status
+          await this.updateSessionStatus(sessionId, SessionStatus.CREATED);
+          logger.error('Failed to transfer revenue, reverting session status', { sessionId });
+        }
+      } else {
+        // If funding insufficient, revert status
+        await this.updateSessionStatus(sessionId, SessionStatus.CREATED);
+        logger.debug('Insufficient funding detected, reverting session status', { sessionId, balance });
+      }
+
     } catch (error) {
+      // If anything fails, try to revert the session status
+      try {
+        await this.updateSessionStatus(sessionId, SessionStatus.CREATED);
+      } catch (revertError) {
+        logger.error('Failed to revert session status after error', { sessionId, revertError });
+      }
+      
       logger.error('Failed to handle funding detection', { sessionId, error });
     }
   }
-
 
   private generateTradingInstructions(tradingConfig: TradingConfiguration): TradingInstruction[] {
     const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[tradingConfig.fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
@@ -444,7 +486,7 @@ export class SessionManagementService {
       {
         step: 2,
         action: 'Tier-Based Trading',
-        description: `Using ${tradingConfig.fundingTier} tier: Buys will use ${tierConfig.buyPercentageMin}-${tierConfig.buyPercentageMax}% of SOL balance, sells will use ${tierConfig.sellPercentageMin}-${tierConfig.sellPercentageMax}% of token balance`,
+        description: `Using ${tradingConfig.fundingTier} tier: Buys will use $${tierConfig.minBuyUSD}-$${tierConfig.maxBuyUSD} per trade, sells will use ${tierConfig.sellPercentageMin}-${tierConfig.sellPercentageMax}% of token balance`,
         minimumAmount: 0
       },
       {
@@ -482,7 +524,7 @@ export class SessionManagementService {
   private estimateTradeCount(tradingConfig: TradingConfiguration): number {
     const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[tradingConfig.fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
     const avgFunding = (tierConfig.minFunding + tierConfig.maxFunding) / 2;
-    const avgTradeSize = avgFunding * (tierConfig.buyPercentageMin + tierConfig.buyPercentageMax) / 200; // Average percentage / 2
+    const avgTradeSize = (tierConfig.minBuyUSD + tierConfig.maxBuyUSD) / 2; // Average USD trade size
     const tradingBalance = avgFunding * 0.75;
     
     return Math.floor(tradingBalance / (avgTradeSize + 0.006)); 

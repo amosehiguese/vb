@@ -12,10 +12,55 @@ import { db } from './config/database';
 import { ephemeralWallets, userSessions } from './db/schema';
 import { eq } from 'drizzle-orm';
 import { Keypair } from '@solana/web3.js';
+import { delay, retry } from './utils/helpers';
 
+
+// Global error handlers for unhandled promise rejections
+process.on('unhandledRejection', (reason: any, promise: Promise<any>) => {
+  logger.error('Unhandled Promise Rejection', {
+    reason: reason instanceof Error ? reason.message : reason,
+    stack: reason instanceof Error ? reason.stack : undefined,
+    promise: promise.toString()
+  });
+  
+  // Don't exit the process for RPC connection errors
+  if (reason instanceof Error && reason.message.includes('fetch failed')) {
+    logger.warn('RPC connection error handled, continuing execution');
+    return;
+  }
+  
+  // For other critical errors, consider graceful shutdown
+  if (reason instanceof Error && !reason.message.includes('WebSocket')) {
+    logger.error('Critical unhandled rejection, initiating graceful shutdown');
+    process.exit(1);
+  }
+});
+
+process.on('uncaughtException', (error: Error) => {
+  logger.error('Uncaught Exception', {
+    error: error.message,
+    stack: error.stack
+  });
+  
+  // Don't exit for network-related errors
+  if (error.message.includes('fetch failed') || error.message.includes('ECONNREFUSED')) {
+    logger.warn('Network error handled, continuing execution');
+    return;
+  }
+  
+  logger.error('Critical uncaught exception, exiting');
+  process.exit(1);
+});
+
+// RecoverStrandedFunds with better error handling
 async function recoverStrandedFunds() {
   logger.info('Starting recovery process for stranded funds...');
-  try {
+  
+  const maxRetries = 3;
+  let attempt = 0;
+  
+  while (attempt < maxRetries) {
+    try {
       const walletService = new WalletManagementService();
 
       // Find all ephemeral wallets that are not marked as 'swept'
@@ -42,21 +87,53 @@ async function recoverStrandedFunds() {
 
               if (session) {
                   logger.info(`Sweeping funds from stranded wallet ${wallet.walletAddress} back to vault ${session.walletAddress}`);
-                  await walletService.sweepAssets(ephemeralKeypair, session.walletAddress, session.contractAddress);
+                  
+                  // Add retry logic for individual wallet recovery
+                  await retry(
+                    async () => {
+                      await walletService.sweepAssets(ephemeralKeypair, session.walletAddress, session.contractAddress);
+                    },
+                    3,
+                    2000,
+                  );
               } else {
-                   logger.error(`Could not find parent session for stranded wallet. Manual recovery may be needed.`, { sessionId: wallet.sessionId, ephemeralAddress: wallet.walletAddress });
+                   logger.error(`Could not find parent session for stranded wallet. Manual recovery may be needed.`, { 
+                     sessionId: wallet.sessionId, 
+                     ephemeralAddress: wallet.walletAddress 
+                   });
               }
+              
+              // Add delay between wallet recoveries to avoid rate limits
+              await delay(1000);
+              
           } catch (recoveryError) {
               logger.error('Failed to recover funds from a specific stranded wallet', {
                   ephemeralWalletId: wallet.id,
-                  error: recoveryError
+                  walletAddress: wallet.walletAddress,
+                  error: recoveryError instanceof Error ? recoveryError.message : 'Unknown error'
               });
           }
       }
+      
       logger.info('Completed stranded funds recovery process.');
-  } catch (error) {
-      logger.error('Critical error during the stranded funds recovery process', { error });
+      return; // Success, exit retry loop
+      
+    } catch (error) {
+        attempt++;
+        logger.error(`Stranded funds recovery attempt ${attempt} failed`, { 
+          error: error instanceof Error ? error.message : 'Unknown error',
+          attemptsRemaining: maxRetries - attempt
+        });
+        
+        if (attempt < maxRetries) {
+          const delayMs = 5000 * attempt; // Increasing delay
+          logger.info(`Retrying stranded funds recovery in ${delayMs}ms`);
+          await delay(delayMs);
+        }
+    }
   }
+  
+  logger.error('All stranded funds recovery attempts failed');
 }
 
 async function startServer() {
@@ -89,8 +166,6 @@ async function startServer() {
         logger.info('Development mode enabled', {
           frontendUrl: env.FRONTEND_URL || 'http://localhost:3000',
           logLevel: env.LOG_LEVEL,
-          minWalletDeposit: env.MIN_WALLET_DEPOSIT,
-          minPrivilegedDeposit: env.MIN_PRIVILEGED_WALLET_DEPOSIT
         });
       }
     });

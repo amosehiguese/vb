@@ -14,6 +14,12 @@ const tokenSymbolSchema = z.string().optional().refine(
   { message: 'Invalid token symbol format' }
 );
 
+const tokenNameSchema = z.string().min(1, "Token name is required")
+
+const tokenPrimaryDexSchema = z.string().min(1, "Token primary dex is required")
+
+const tokenDecimalsSchema = z.coerce.number().int().nonnegative();
+
 const fundingTierSchema = z.string().min(1, "Funding tier name is required")
   .refine(
     (tier) => {
@@ -31,7 +37,10 @@ export const validateTokenRequestSchema = z.object({
 export const createSessionRequestSchema = z.object({
   contractAddress: solanaAddressSchema,
   tokenSymbol: tokenSymbolSchema,
-  fundingTierName: fundingTierSchema
+  fundingTierName: fundingTierSchema,
+  tokenName: tokenNameSchema,
+  primaryDex: tokenPrimaryDexSchema,   
+  decimals: tokenDecimalsSchema  
 });
 
 // Generic validation middleware factory

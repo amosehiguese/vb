@@ -3,6 +3,7 @@ import { z } from 'zod';
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.string().transform(Number).default(3000),
+  SOL_PRICE: z.string().transform(Number).default(212),
   DATABASE_URL: z.string(),
   SOLANA_RPC_URL: z.string().regex(/^https?:\/\/.+/),
   JUPITER_API_URL: z.string().regex(/^https?:\/\/.+/).default('https://lite-api.jup.ag'),

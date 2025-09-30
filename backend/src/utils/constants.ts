@@ -19,18 +19,20 @@ export const TRADING_CONSTANTS = {
   REVENUE_PERCENTAGE: env.REVENUE_PERCENTAGE,
   TARGET_DEPLETION: 75, // 75%
   TRADING_BALANCE_DEPLETION_TARGET: 95, 
-  DEFAULT_SLIPPAGE: 5, // 5%
-  MAX_SLIPPAGE: 20, // 20%
-  MIN_TRADE_SOL: 0.001,
+  DEFAULT_SLIPPAGE: 10, // 10%
+  MAX_SLIPPAGE: 25,    // 25%
+  SLIPPAGE_INCREMENT: 2, 
+  MIN_TRADE_USD: 0.50,
   MIN_LIQUIDITY_USD: 1, // $1 minimum liquidity
-  TRADE_INTERVAL_MS: 3000, // 3 seconds between trades
+  TRADE_INTERVAL_MS: 5000, // 5 seconds between trades
   MAX_CONSECUTIVE_FAILURES: 5,
   WALLET_BALANCE_CHECK_INTERVAL: 10000, // 10 seconds
   TRANSACTION_TIMEOUT: 30000, // 30 seconds
   JITO_TIP_LAMPORTS: 10000, // Jito tip amount in lamports (0.00001 SOL)
-  ATA_CREATION_FEE_BUFFER: 0.00204, // (in SOL) A safe buffer for rent exemption on new token accounts.
-  NETWORK_FEE_BUFFER: 0.00001, 
+  ATA_CREATION_FEE_BUFFER: 0.01, // (in SOL) A safe buffer for rent exemption on new token accounts.
+  NETWORK_FEE_BUFFER: 0.0011, 
   JUPITER_FEE_BPS: 10, // Jupiter fee constant (0.1%) 
+  SOL_PRICE: env.SOL_PRICE,
   MAX_TRADES_PER_SESSION: {
     MICRO: 2000,
     SMALL: 5000,
@@ -42,47 +44,40 @@ export const TRADING_CONSTANTS = {
       name: 'micro',
       minFunding: 0.01,
       maxFunding: 0.09,
-      buyPercentageMin: 0.3,        // Changed from 15
-      buyPercentageMax: 0.8,        // Changed from 25
-      sellPercentageMin: 5,         // Changed from 30
-      sellPercentageMax: 15,        // Changed from 60
-      maxBuyUSD: 0.10,             // Changed from 20
+      sellPercentageMin: 5,
+      sellPercentageMax: 15,
+      minBuyUSD: 0.50,             
+      maxBuyUSD: 1.50,              
       description: 'Micro funding (0.01-0.09 SOL) - Privileged wallets only'
     },
     SMALL: {
       name: 'small',
       minFunding: 0.1,
       maxFunding: 0.9,
-      buyPercentageMin: 0.1,        // Changed from 5
-      buyPercentageMax: 0.5,        // Changed from 15
-      sellPercentageMin: 2,         // Changed from 25
-      sellPercentageMax: 8,         // Changed from 50
-      minBuyUSD: 0.01,             // Changed from 2
-      maxBuyUSD: 0.50,             // Changed from 50
+      sellPercentageMin: 2,
+      sellPercentageMax: 8,
+      minBuyUSD: 1.00,
+      maxBuyUSD: 3.00,
       description: 'Small funding (0.1-0.9 SOL)'
     },
     STANDARD: {
       name: 'standard',
       minFunding: 1.0,
       maxFunding: 9.0,
-      buyPercentageMin: 0.02,       // Changed from 2
-      buyPercentageMax: 0.15,       // Changed from 4
-      sellPercentageMin: 1,         // Changed from 25
-      sellPercentageMax: 5,         // Changed from 50
-      minBuyUSD: 0.01,             // Changed from 5
-      maxBuyUSD: 0.50,             // Changed from 100
+      sellPercentageMin: 1,
+      sellPercentageMax: 5,
+      minBuyUSD: 3.00,              
+      maxBuyUSD: 10.00,             
       description: 'Standard funding (1-9 SOL)'
     },
     HIGH: {
       name: 'high',
       minFunding: 10.0,
       maxFunding: 100000.0,
-      buyPercentageMin: 0.005,      // Changed from 1
-      buyPercentageMax: 0.03,       // Changed from 3
-      sellPercentageMin: 0.5,       // Changed from 20
-      sellPercentageMax: 2,         // Changed from 40
-      minBuyUSD: 0.01,             // Changed from 20
-      maxBuyUSD: 0.50,             // Changed from 500
+      sellPercentageMin: 0.5,
+      sellPercentageMax: 3,
+      minBuyUSD: 10.00,             
+      maxBuyUSD: 30.00,             
       description: 'High funding (10+ SOL)'
     }
   },

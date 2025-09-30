@@ -1,1 +1,0 @@
-ALTER TABLE "user_sessions" ALTER COLUMN "last_trade_type" DROP DEFAULT;

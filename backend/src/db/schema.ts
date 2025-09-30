@@ -7,7 +7,7 @@ export const userSessions = pgTable('user_sessions', {
   walletAddress: varchar('wallet_address', { length: 44 }).notNull(),
   privateKey: text('private_key').notNull(), // Encrypted
   contractAddress: varchar('contract_address', { length: 44 }).notNull(),
-  fundingTier: varchar('funding_tier', { length: 20 }).default('standard'),
+  fundingTier: varchar('funding_tier', { length: 20 }).default('small'),
   tokenSymbol: varchar('token_symbol', { length: 20 }),
   fundingAmount: decimal('funding_amount', { precision: 18, scale: 9 }),
   lastTradeType: varchar('last_trade_type', { length: 10 }), 

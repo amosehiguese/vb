@@ -1,13 +1,12 @@
 import { logger } from '../config/logger';
 import { db } from '../config/database';
 import { userSessions, transactions, tokens } from '../db/schema';
-import { eq, desc, and } from 'drizzle-orm';
+import { eq, desc, and, sql } from 'drizzle-orm';
 import axios, { AxiosInstance } from 'axios';
 import {
   SessionStatus,
   SessionMetrics,
   AutoTradingState,
-  TradingConfiguration,
   FundingTierName
 } from '../types/session';
 import {
@@ -24,9 +23,12 @@ import {
   API_CONFIG,
   TRADING_CONSTANTS,
 } from '../utils/constants';
+import {createError} from '../utils/errors';
 import { WalletManagementService } from './WalletManagementService';
 import { TradingService } from './TradingService';
-import { Keypair } from "@solana/web3.js";
+import { Connection, ConnectionConfig, Keypair, PublicKey } from "@solana/web3.js";
+import { getOrCreateAssociatedTokenAccount } from '@solana/spl-token';
+import { env } from '../config/environment';
 
 export class AutoTradingService {
   private _sessionManagementService: any = null;
@@ -57,7 +59,7 @@ export class AutoTradingService {
     return this._sessionManagementService;
   }
 
-  // Alternative: Accept SessionManagementService as a parameter when needed
+  // Accept SessionManagementService as a parameter when needed
   setSessionManagementService(sessionManagementService: any) {
     this._sessionManagementService = sessionManagementService;
   }
@@ -106,32 +108,182 @@ export class AutoTradingService {
   }
 
   async stopAutoTrading(sessionId: string, reason?: string): Promise<void> {
+    logger.info('Attempting to stop auto-trading', { sessionId, reason });
+
+    // Get current session data
+    const session = await this.getSessionFromDatabase(sessionId);
+    if (!session) {
+      throw createError.notFound('Session not found', 'SESSION_NOT_FOUND');
+    }
+
+    // Check if session is already stopped
+    if (session.status === SessionStatus.STOPPED || session.status === SessionStatus.COMPLETED) {
+      throw createError.validation(
+        `Session is already ${session.status}`,
+        `ALREADY_${session.status.toUpperCase()}`
+      );
+    }
+
+    // Stop the in-memory trading loop
     const sessionState = this.activeSessions.get(sessionId);
     if (sessionState) {
-        sessionState.stop = true; // This will stop the while loop
-        this.activeSessions.delete(sessionId);
-        await this.updateSessionStatus(sessionId, SessionStatus.STOPPED);
-        logger.info('Auto-trading stopped', { sessionId, reason });
-
-        const session = await this.getSessionFromDatabase(sessionId);
-        if (session && session.walletAddress) {
-            await this.walletManagementService.stopWalletMonitoring(session.walletAddress);
-        }
+      sessionState.stop = true;
+      this.activeSessions.delete(sessionId);
+      
+      // Stop wallet monitoring
+      if (session.walletAddress) {
+        await this.walletManagementService.stopWalletMonitoring(session.walletAddress);
+      }
     }
+
+    // Update session status
+    await this.updateSessionStatus(sessionId, SessionStatus.STOPPED);
+    
+    logger.info('Auto-trading stopped successfully', { sessionId, reason });
   }
 
   async pauseAutoTrading(sessionId: string, reason: string): Promise<void> {
-    // This stops the in-memory loop and updates the persistent state to 'paused'.
-    await this.stopAutoTrading(sessionId, `Paused: ${reason}`);
+    logger.info('Attempting to pause auto-trading', { sessionId, reason });
+
+    // Get current session data
+    const session = await this.getSessionFromDatabase(sessionId);
+    if (!session) {
+      throw createError.notFound('Session not found', 'SESSION_NOT_FOUND');
+    }
+
+    // Check if session is in a pauseable state
+    if (session.status === SessionStatus.COMPLETED || session.status === SessionStatus.STOPPED) {
+      throw createError.invalidSessionStatus(
+        session.status, 
+        'trading or active', 
+        'pause'
+      );
+    }
+
+    if (session.status === SessionStatus.PAUSED) {
+      throw createError.validation(
+        'Session is already paused',
+        'ALREADY_PAUSED'
+      );
+    }
+
+    // Get wallet and check balance
+    const vaultWallet = await this.walletManagementService.getWalletByAddress(session.walletAddress);
+    if (!vaultWallet) {
+      throw createError.notFound('Session wallet not found', 'WALLET_NOT_FOUND');
+    }
+
+    const currentBalance = await this.walletManagementService.getWalletBalance(vaultWallet.address);
+    
+    // Validate balance for pause operation
+    // For pause, we need at least MIN_TRADE_SOL to ensure resuming is possible
+    const solPrice = await this.getTokenPrice('So11111111111111111111111111111111111111112');
+    const minimumViableBalanceUSD = TRADING_CONSTANTS.MIN_TRADE_USD;
+    const minimumViableBalance = minimumViableBalanceUSD / solPrice;
+    
+    if (currentBalance < minimumViableBalance) {
+      throw createError.insufficientBalance(
+        currentBalance,
+        minimumViableBalance,
+        'pause',
+        {
+          suggestion: `The wallet balance is too low to pause safely. Need at least $${minimumViableBalanceUSD} (${minimumViableBalance.toFixed(6)} SOL). Consider stopping the session instead.`,
+          actionCode: 'SUGGEST_STOP_INSTEAD'
+        }
+      );
+    }
+
+    // Stop the in-memory trading loop
+    const sessionState = this.activeSessions.get(sessionId);
+    if (sessionState) {
+      sessionState.stop = true;
+      this.activeSessions.delete(sessionId);
+      
+      // Stop wallet monitoring
+      await this.walletManagementService.stopWalletMonitoring(session.walletAddress);
+    }
+
+    // Update session status to paused
     await this.updateSessionStatus(sessionId, SessionStatus.PAUSED);
-    logger.info('Auto-trading paused', { sessionId, reason });
+    
+    logger.info('Auto-trading paused successfully', { 
+      sessionId, 
+      reason, 
+      currentBalance: currentBalance.toFixed(6) 
+    });
   }
 
   async resumeAutoTrading(sessionId: string): Promise<void> {
-      // Resuming is now equivalent to starting the session again.
-      // It will check the DB state and continue where it left off.
-      logger.info('Attempting to resume auto-trading', { sessionId });
-      await this.startAutoTrading(sessionId);
+    logger.info('Attempting to resume auto-trading', { sessionId });
+
+    // Get current session data
+    const session = await this.getSessionFromDatabase(sessionId);
+    if (!session) {
+      throw createError.notFound('Session not found', 'SESSION_NOT_FOUND');
+    }
+
+    // Check if session is in a resumeable state
+    if (session.status !== SessionStatus.PAUSED) {
+      throw createError.invalidSessionStatus(
+        session.status,
+        'paused',
+        'resume'
+      );
+    }
+
+    // Get wallet and check balance
+    const vaultWallet = await this.walletManagementService.getWalletByAddress(session.walletAddress);
+    if (!vaultWallet) {
+      throw createError.notFound('Session wallet not found', 'WALLET_NOT_FOUND');
+    }
+
+    const currentBalance = await this.walletManagementService.getWalletBalance(vaultWallet.address);
+    
+    // Calculate minimum required balance for trading operations
+    const solPrice = await this.getTokenPrice('So11111111111111111111111111111111111111112');
+    const minimumTradeAmountUSD = TRADING_CONSTANTS.MIN_TRADE_USD;
+    const minimumTradeAmount = minimumTradeAmountUSD / solPrice;
+    const feeBuffer = TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER + TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
+    const minimumRequired = minimumTradeAmount + feeBuffer;
+
+    // Validate balance for resume operation
+    if (currentBalance < minimumRequired) {
+      const shortfall = minimumRequired - currentBalance;
+      throw createError.insufficientBalance(
+        currentBalance,
+        minimumRequired,
+        'resume',
+        {
+          breakdown: {
+            tradingAmount: minimumTradeAmount,
+            fees: feeBuffer,
+            total: minimumRequired
+          },
+          shortfall,
+          suggestion: `Add at least ${shortfall.toFixed(6)} SOL to your wallet before resuming trading.`
+        }
+      );
+    }
+
+    // Check if session is already running in memory
+    if (this.activeSessions.has(sessionId)) {
+      throw createError.validation(
+        'Session is already running',
+        'ALREADY_RUNNING'
+      );
+    }
+
+    // Update session status back to trading
+    await this.updateSessionStatus(sessionId, SessionStatus.TRADING);
+
+    // Start the trading loop
+    await this.startAutoTrading(sessionId);
+    
+    logger.info('Auto-trading resumed successfully', { 
+      sessionId, 
+      currentBalance: currentBalance.toFixed(6),
+      minimumRequired: minimumRequired.toFixed(6)
+    });
   }
 
   async getTradingState(sessionId: string): Promise<AutoTradingState | null> {
@@ -262,12 +414,16 @@ export class AutoTradingService {
 
         const initialTradingBalance = parseFloat(session.initialBalance || '0'); 
         if (initialTradingBalance > 0) {
-          const minimumViableBalance = TRADING_CONSTANTS.MIN_TRADE_SOL; 
+          const solPrice = await this.getTokenPrice('So11111111111111111111111111111111111111112');
+          const minimumViableBalanceUSD = TRADING_CONSTANTS.MIN_TRADE_USD;
+          const minimumViableBalance = minimumViableBalanceUSD / solPrice;
+          
           if (vaultBalance < minimumViableBalance) {
             logger.info('Minimum viable balance reached - completing session', {
               sessionId,
               vaultBalance: vaultBalance.toFixed(6),
-              minimumRequired: minimumViableBalance
+              minimumRequiredUSD: minimumViableBalanceUSD,
+              minimumRequiredSOL: minimumViableBalance.toFixed(6)
             });
             await this.completeSession(sessionId);
             return false;
@@ -278,10 +434,11 @@ export class AutoTradingService {
         let nextTradeType = await this.determineNextTradeType(sessionId, session);
 
         if (nextTradeType === TradeType.BUY) {
-          // Check if we have enough SOL for minimum buy before creating ephemeral wallet
-          const minBuyAmount = TRADING_CONSTANTS.MIN_TRADE_SOL;
+          const solPrice = await this.getTokenPrice('So11111111111111111111111111111111111111112');
+          const minBuyAmountUSD = TRADING_CONSTANTS.MIN_TRADE_USD;
+          const minBuyAmount = minBuyAmountUSD / solPrice;
           const requiredForBuy = minBuyAmount + TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER + TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
-          
+
           if (vaultBalance < requiredForBuy) {
             logger.warn('Cannot execute BUY: insufficient SOL, forcing SELL instead', {
               sessionId,
@@ -327,7 +484,14 @@ export class AutoTradingService {
           await this.updateConsecutiveTradeCount(sessionId, nextTradeType);
 
           const updatedVaultBalance = await this.walletManagementService.getWalletBalance(vaultWallet.address);
-          await this._sessionManagementService.updateSessionBalance(sessionId, updatedVaultBalance);
+          if (this._sessionManagementService) {
+            await this._sessionManagementService.updateSessionBalance(sessionId, updatedVaultBalance);
+          } else {
+            // Fallback update
+            await db.update(userSessions)
+              .set({ currentBalance: updatedVaultBalance.toString(), updatedAt: new Date() })
+              .where(eq(userSessions.sessionId, sessionId));
+          }
         }
         
         await this.handleTradeResult(sessionId, tradeResult, ephemeralKeypair.publicKey.toString());
@@ -345,6 +509,9 @@ export class AutoTradingService {
       return false;
     } finally {
         if (ephemeralKeypair) {
+           // Wait 8 seconds for full blockchain settlement
+           await delay(8000); // 8 second delay
+            
             await this.walletManagementService.sweepAssets(ephemeralKeypair, vaultWallet.address, session.contractAddress);
         }
     }
@@ -358,7 +525,7 @@ export class AutoTradingService {
     if (solPrice === 0) throw new Error('Could not fetch SOL price.');
   
     // Use funding tier from session
-    const fundingTier = session.fundingTier || 'standard'; // Default fallback
+    const fundingTier = session.fundingTier || 'small'; // Default fallback
     let tradeSize = this.calculateBuyTradeSize(vaultBalance, solPrice, session.sessionId, fundingTier);
     
     let totalAmountToSend = tradeSize.solAmount + TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER + TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
@@ -372,9 +539,10 @@ export class AutoTradingService {
       });
       
       // Try with minimum possible trade size
-      const minimumTradeSize = TRADING_CONSTANTS.MIN_TRADE_SOL; // 0.001 SOL minimum
+      const minimumTradeSizeUSD = TRADING_CONSTANTS.MIN_TRADE_USD; // $0.50 minimum
+      const minimumTradeSize = minimumTradeSizeUSD / solPrice;
       const minimumTotalNeeded = minimumTradeSize + TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER + TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
-      
+
       if (vaultBalance < minimumTotalNeeded) {
         throw new Error(`Insufficient vault balance even for minimum trade: ${vaultBalance.toFixed(6)} < ${minimumTotalNeeded.toFixed(6)}`);
       }
@@ -426,41 +594,34 @@ export class AutoTradingService {
   } {
     const tierConfig = TRADING_CONSTANTS.FUNDING_TIERS[fundingTier.toUpperCase() as keyof typeof TRADING_CONSTANTS.FUNDING_TIERS];
     
-    // Generate random percentage within tier limits
-    const randomPercentage = Math.random() * 
-      (tierConfig.buyPercentageMax - tierConfig.buyPercentageMin) + 
-      tierConfig.buyPercentageMin;
+    // Generate random USD amount within tier limits
+    const randomUsdAmount = Math.random() * 
+      (tierConfig.maxBuyUSD - tierConfig.minBuyUSD) + 
+      tierConfig.minBuyUSD;
     
-    // Calculate SOL amount based on percentage
-    let solAmount = (vaultBalance * randomPercentage) / 100;
-    const usdValue = solAmount * solPrice;
+    // Convert to SOL
+    const solAmount = randomUsdAmount / solPrice;
     
-    // Apply tier-specific USD limits
-    const minBuyUSD = 'minBuyUSD' in tierConfig ? tierConfig.minBuyUSD : undefined;
+    // Safety check: don't exceed available balance
+    const maxAvailable = vaultBalance - TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER - TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
+    const finalSolAmount = Math.min(solAmount, maxAvailable);
+    const finalUsdValue = finalSolAmount * solPrice;
     
-    if (minBuyUSD && usdValue < minBuyUSD) {
-      solAmount = minBuyUSD / solPrice;
-    }
-    if (usdValue > tierConfig.maxBuyUSD) {
-      solAmount = tierConfig.maxBuyUSD / solPrice;
-    }
+    const actualPercentageUsed = (finalSolAmount / vaultBalance) * 100;
     
-    const finalUsdValue = solAmount * solPrice;
-    const actualPercentageUsed = (solAmount / vaultBalance) * 100;
-    
-    logger.debug('buy size calculated', {
+    logger.debug('Direct USD buy size calculated', {
       sessionId,
       fundingTier,
-      vaultBalance: vaultBalance.toFixed(9),      // More decimal places
-      targetPercentage: randomPercentage.toFixed(3),
-      solAmount: solAmount.toFixed(9),
-      usdValue: finalUsdValue.toFixed(4),         // More precision
+      vaultBalance: vaultBalance.toFixed(9),
+      targetUsdAmount: randomUsdAmount.toFixed(2),
+      finalUsdValue: finalUsdValue.toFixed(2),
+      solAmount: finalSolAmount.toFixed(9),
       actualPercentage: actualPercentageUsed.toFixed(3),
-      tierLimits: `$${minBuyUSD || 0.01}-${tierConfig.maxBuyUSD}`
+      tierLimits: `$${tierConfig.minBuyUSD}-${tierConfig.maxBuyUSD}`
     });
     
     return {
-      solAmount,
+      solAmount: finalSolAmount,
       usdValue: finalUsdValue,
       percentageUsed: actualPercentageUsed
     };
@@ -473,6 +634,36 @@ export class AutoTradingService {
     const fundingTier = session.fundingTier || 'standard';
     const sellAmount = await this.calculateSellTradeSize(vaultTokenBalanceRaw, session.sessionId, session.contractAddress, fundingTier);
     
+    try {
+      const mintPublicKey = new PublicKey(session.contractAddress);
+      
+      const connectionConfig: ConnectionConfig = {
+        commitment: 'confirmed',
+        fetch: fetch as any,
+      };
+
+      const connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
+      const vaultTokenAccount = await getOrCreateAssociatedTokenAccount(
+        connection,
+        vaultWallet.keypair, // Vault wallet pays for ATA creation
+        mintPublicKey,
+        vaultWallet.keypair.publicKey
+      );
+      
+      logger.info('Vault ATA verified/created', {
+        sessionId: session.sessionId,
+        vaultAddress: vaultWallet.address,
+        tokenMint: session.contractAddress,
+        ataAddress: vaultTokenAccount.address.toString()
+      });
+    } catch (ataError) {
+      logger.error('Failed to create/verify vault ATA', {
+        sessionId: session.sessionId,
+        error: ataError instanceof Error ? ataError.message : 'Unknown error'
+      });
+      throw new Error(`Cannot create vault token account: ${ataError instanceof Error ? ataError.message : 'Unknown error'}`);
+    }
+
     const solForFees = TRADING_CONSTANTS.NETWORK_FEE_BUFFER + TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER;
     await this.walletManagementService.transferFunds(
       vaultWallet.keypair, 
@@ -709,6 +900,22 @@ export class AutoTradingService {
       });
     }
   }
+
+  private async getTradeCount(sessionId: string): Promise<number> {
+    try {
+      const result = await db.select({ count: sql`count(*)` })
+        .from(transactions)
+        .where(and(
+          eq(transactions.sessionId, sessionId),
+          eq(transactions.status, 'confirmed')
+        ));
+      
+      return Number(result[0]?.count || 0);
+    } catch (error) {
+      logger.error('Failed to get trade count', { sessionId, error });
+      return 0;
+    }
+  }
   
   
   private getConsecutiveTradeCount(trades: Array<{type: string, createdAt: Date}>): {type: TradeType | null, count: number} {
@@ -788,17 +995,118 @@ export class AutoTradingService {
     }
   }
 
-  private calculateTradeSize(currentBalance: number, isPrivileged: boolean): number {
-    // Calculate trade size as percentage of available balance
-    const minTradeSize = isPrivileged ? 0.001 : 0.01;
-    const maxTradeSize = isPrivileged ? 0.01 : 0.1;
-    
-    // Use 3-7% of current balance for each trade
-    const tradePercentage = 0.03 + (Math.random() * 0.04);
-    const calculatedSize = currentBalance * tradePercentage;
-    
-    // Ensure within bounds
-    return Math.max(minTradeSize, Math.min(maxTradeSize, calculatedSize));
+  async validateSessionForOperation(sessionId: string, operation: 'pause' | 'resume' | 'stop'): Promise<{
+    session: any;
+    wallet: any;
+    currentBalance: number;
+    canProceed: boolean;
+    validationError?: any;
+  }> {
+    try {
+      // Get session
+      const session = await this.getSessionFromDatabase(sessionId);
+      if (!session) {
+        return {
+          session: null,
+          wallet: null,
+          currentBalance: 0,
+          canProceed: false,
+          validationError: createError.notFound('Session not found', 'SESSION_NOT_FOUND')
+        };
+      }
+
+      // Get wallet
+      const wallet = await this.walletManagementService.getWalletByAddress(session.walletAddress);
+      if (!wallet) {
+        return {
+          session,
+          wallet: null,
+          currentBalance: 0,
+          canProceed: false,
+          validationError: createError.notFound('Session wallet not found', 'WALLET_NOT_FOUND')
+        };
+      }
+
+      // Get current balance
+      const currentBalance = await this.walletManagementService.getWalletBalance(wallet.address);
+
+      // Operation-specific validations
+      let validationError = null;
+      let canProceed = true;
+
+      switch (operation) {
+        case 'pause':
+          if (session.status === SessionStatus.PAUSED) {
+            validationError = createError.validation('Session is already paused', 'ALREADY_PAUSED');
+            canProceed = false;
+          } else {
+            const solPrice = await this.getTokenPrice('So11111111111111111111111111111111111111112');
+            const minimumViableBalanceUSD = TRADING_CONSTANTS.MIN_TRADE_USD;
+            const minimumViableBalance = minimumViableBalanceUSD / solPrice;
+            
+            if (currentBalance < minimumViableBalance) {
+              validationError = createError.insufficientBalance(
+                currentBalance,
+                minimumViableBalance,
+                'pause'
+              );
+              canProceed = false;
+            }
+          }
+          break;
+
+        case 'resume':
+          if (session.status !== SessionStatus.PAUSED) {
+            validationError = createError.invalidSessionStatus(session.status, 'paused', 'resume');
+            canProceed = false;
+          } else {
+            const solPrice = await this.getTokenPrice('So11111111111111111111111111111111111111112');
+            const minimumTradeAmountUSD = TRADING_CONSTANTS.MIN_TRADE_USD;
+            const minimumTradeAmount = minimumTradeAmountUSD / solPrice;
+            const minimumRequired = minimumTradeAmount + 
+                                  TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER + 
+                                  TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
+                                  
+            if (currentBalance < minimumRequired) {
+              validationError = createError.insufficientBalance(
+                currentBalance,
+                minimumRequired,
+                'resume'
+              );
+              canProceed = false;
+            }
+          }
+          break;
+
+        case 'stop':
+          if (session.status === SessionStatus.STOPPED || session.status === SessionStatus.COMPLETED) {
+            validationError = createError.validation(
+              `Session is already ${session.status}`,
+              `ALREADY_${session.status.toUpperCase()}`
+            );
+            canProceed = false;
+          }
+          break;
+      }
+
+      return {
+        session,
+        wallet,
+        currentBalance,
+        canProceed,
+        validationError
+      };
+
+    } catch (error) {
+      logger.error('Session validation failed', { sessionId, operation, error });
+      return {
+        session: null,
+        wallet: null,
+        currentBalance: 0,
+        canProceed: false,
+        validationError: error
+      };
+    }
   }
 
   private async completeSession(sessionId: string): Promise<void> {

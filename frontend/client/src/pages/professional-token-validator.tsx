@@ -16,60 +16,44 @@ const FUNDING_TIERS = [
     label: 'Micro',
     minFunding: 0.01,
     maxFunding: 0.09,
-    buyPercentageMin: 0.3,
-    buyPercentageMax: 0.8,
-    sellPercentageMin: 5,
-    sellPercentageMax: 15,
-    maxBuyUSD: 0.10,
-    estimatedTrades: '1,500-2,000',
-    duration: '1-2.5 hours',
-    recommended: true
+    minBuyUSD: 0.50,
+    maxBuyUSD: 1.50,
+    tradeRange: '$0.50 - $1.00',
   },
   {
     name: 'small',
     label: 'Small',
     minFunding: 0.1,
     maxFunding: 0.9,
-    buyPercentageMin: 0.1,
-    buyPercentageMax: 0.5,
-    sellPercentageMin: 2,
-    sellPercentageMax: 8,
-    maxBuyUSD: 0.50,
-    estimatedTrades: '3,000-8,000',
-    duration: '2-6 hours'
+    minBuyUSD: 1.00,
+    maxBuyUSD: 3.00,
+    tradeRange: '$1.00 - $3.00',
+    recommended: true
   },
   {
     name: 'standard',
     label: 'Standard',
     minFunding: 1.0,
     maxFunding: 9.0,
-    buyPercentageMin: 0.02,
-    buyPercentageMax: 0.15,
-    sellPercentageMin: 1,
-    sellPercentageMax: 5,
-    maxBuyUSD: 0.50,
-    estimatedTrades: '5,000-15,000',
-    duration: '4-12 hours'
+    minBuyUSD: 3.00,
+    maxBuyUSD: 10.00,
+    tradeRange: '$3.00 - $10.00'
   },
   {
     name: 'high',
     label: 'High Volume',
     minFunding: 10.0,
-    maxFunding: 100000.0,
-    buyPercentageMin: 0.005,
-    buyPercentageMax: 0.03,
-    sellPercentageMin: 0.5,
-    sellPercentageMax: 2,
-    maxBuyUSD: 0.50,
-    estimatedTrades: '10,000+',
-    duration: '8-24+ hours'
+    maxFunding: 1000.0,
+    minBuyUSD: 10.00,
+    maxBuyUSD: 30.00,
+    tradeRange: '$10.00 - $30.00'
   }
 ];
 
 export default function ProfessionalTokenValidator() {
   const [step, setStep] = useState(1);
   const [contractAddress, setContractAddress] = useState('');
-  const [selectedTier, setSelectedTier] = useState('micro');
+  const [selectedTier, setSelectedTier] = useState('small');
   const [validationResult, setValidationResult] = useState<any>(null);
   const [sessionResult, setSessionResult] = useState<any>(null);
   const walletRef = useRef<HTMLDivElement>(null);
@@ -102,15 +86,18 @@ export default function ProfessionalTokenValidator() {
   });
 
   const createSessionMutation = useMutation({
-    mutationFn: async ({ contractAddress, tokenSymbol, fundingTierName }: {
+    mutationFn: async ({ contractAddress, tokenSymbol, tokenName, primaryDex, decimals, fundingTierName }: {
       contractAddress: string;
       tokenSymbol: string;
+      tokenName: string;
+      primaryDex: string;
+      decimals: number;
       fundingTierName: string;
     }) => {
       const response = await fetch(API_ENDPOINTS.CREATE_SESSION, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ contractAddress, tokenSymbol, fundingTierName }),
+        body: JSON.stringify({ contractAddress, tokenSymbol, fundingTierName, tokenName, primaryDex, decimals }),
       });
       const data = await response.json();
       if (!response.ok || !data.success) throw new Error(data.error || 'Session creation failed');
@@ -239,25 +226,9 @@ export default function ProfessionalTokenValidator() {
                               )}
                             </div>
                             
-                            <div className="space-y-1 sm:space-y-2 text-xs sm:text-sm">
-                              <div className="flex items-center text-gray-300">
-                                <TrendingUp className="w-3 h-3 sm:w-4 sm:h-4 mr-2 text-emerald-400" />
-                                <span>{tier.estimatedTrades} trades</span>
-                              </div>
-                              <div className="flex items-center text-gray-300">
-                                <Info className="w-3 h-3 sm:w-4 sm:h-4 mr-2 text-blue-400" />
-                                <span>{tier.duration}</span>
-                              </div>
-                              <div className="flex items-center text-gray-300">
-                                <Wallet className="w-3 h-3 sm:w-4 sm:h-4 mr-2 text-purple-400" />
-                                <span>$0.01-${tier.maxBuyUSD.toFixed(2)} per trade</span>
-                              </div>
-                            </div>
-                            
-                            <div className="mt-2 sm:mt-3 pt-2 sm:pt-3 border-t border-gray-700">
-                              <p className="text-xs text-gray-400">
-                                Buy: {tier.buyPercentageMin}-{tier.buyPercentageMax}% • Sell: {tier.sellPercentageMin}-{tier.sellPercentageMax}%
-                              </p>
+                            <div className="flex items-center text-gray-300 text-xs sm:text-sm">
+                              <Wallet className="w-3 h-3 sm:w-4 sm:h-4 mr-2 text-purple-400" />
+                              <span>${tier.minBuyUSD.toFixed(2)} - ${tier.maxBuyUSD.toFixed(2)} per trade</span>
                             </div>
                           </div>
                         ))}
@@ -421,6 +392,9 @@ export default function ProfessionalTokenValidator() {
                           onClick={() => createSessionMutation.mutate({
                             contractAddress: validationResult.contractAddress,
                             tokenSymbol: validationResult.token.symbol,
+                            tokenName: validationResult.token.name,
+                            primaryDex: validationResult.primaryDex,
+                            decimals: validationResult.token.decimals,
                             fundingTierName: selectedTier,
                           })}
                           disabled={createSessionMutation.isPending}
@@ -545,7 +519,7 @@ export default function ProfessionalTokenValidator() {
               </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 text-center">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 sm:gap-4 text-center">
               <div className="p-3 bg-gray-800/50 rounded-lg">
                 <p className="text-xs text-gray-400">Token</p>
                 <p className="font-semibold text-white text-sm sm:text-base">{sessionResult.token.symbol}</p>
@@ -560,12 +534,6 @@ export default function ProfessionalTokenValidator() {
                 <p className="text-xs text-gray-400">Funding Tier</p>
                 <p className="font-semibold text-emerald-400 text-sm sm:text-base capitalize">
                   {sessionResult.fundingTier}
-                </p>
-              </div>
-              <div className="p-3 bg-gray-800/50 rounded-lg">
-                <p className="text-xs text-gray-400">Estimated Trades</p>
-                <p className="font-semibold text-blue-400 text-sm sm:text-base">
-                  {sessionResult.estimatedTrades?.toLocaleString() || 'N/A'}
                 </p>
               </div>
             </div>

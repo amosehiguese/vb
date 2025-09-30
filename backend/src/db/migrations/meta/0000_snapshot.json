@@ -1,5 +1,5 @@
 {
-  "id": "90e39f2b-b08e-4fd0-9531-d98f93c3620e",
+  "id": "b3dc8186-a9ce-4a3f-b1ac-b89acc8784c5",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -455,7 +455,7 @@
           "type": "varchar(20)",
           "primaryKey": false,
           "notNull": false,
-          "default": "'standard'"
+          "default": "'small'"
         },
         "token_symbol": {
           "name": "token_symbol",
@@ -473,8 +473,7 @@
           "name": "last_trade_type",
           "type": "varchar(10)",
           "primaryKey": false,
-          "notNull": false,
-          "default": "'sell'"
+          "notNull": false
         },
         "current_balance": {
           "name": "current_balance",

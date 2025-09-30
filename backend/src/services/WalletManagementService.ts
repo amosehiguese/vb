@@ -1,4 +1,4 @@
-import { Keypair, PublicKey, Connection, SystemProgram, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
+import { Keypair, ConnectionConfig, PublicKey, Connection, SystemProgram, Transaction, sendAndConfirmTransaction } from '@solana/web3.js';
 import { getAssociatedTokenAddress, createTransferInstruction, getOrCreateAssociatedTokenAccount, getAccount, createCloseAccountInstruction } from '@solana/spl-token';
 import crypto from 'crypto';
 import { logger } from '../config/logger';
@@ -15,13 +15,15 @@ import {
   hasSufficientFunding,
   solToLamports,
   calculateRevenue,
-  delay
+  delay,
+  sanitizeErrorMessage
 } from '../utils/helpers';
 import {
   TRADING_CONSTANTS,
   PRIVILEGED_WALLET_ADDRESSES,
 } from '../utils/constants';
 import { createError } from '../middleware/errorHandler';
+import fetch from 'node-fetch'; 
 
 export class WalletManagementService {
   private connection: Connection;
@@ -39,7 +41,12 @@ export class WalletManagementService {
   );
 
   constructor() {
-    this.connection = new Connection(env.SOLANA_RPC_URL, 'confirmed');
+    const connectionConfig: ConnectionConfig = {
+      commitment: 'confirmed',
+      fetch: fetch as any, 
+    };
+  
+    this.connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
     this.initializePrivilegedWallets();
     this.setupConnectionMonitoring();
   }
@@ -58,29 +65,70 @@ export class WalletManagementService {
   }
 
   private setupConnectionMonitoring(): void {
-    // Monitor WebSocket connection status
-    setInterval(() => {
+    let consecutiveFailures = 0;
+    const maxFailures = 5;
+
+    const healthCheck = async () => {
       try {
-        // Test connection by checking if we can make a simple call
-        this.connection.getSlot().then(() => {
-          if (!this.isConnected) {
-            logger.info('WebSocket connection restored, resubscribing to wallets');
-            this.isConnected = true;
-            this.resubscribeAllWallets();
-          }
-        }).catch(() => {
-          if (this.isConnected) {
-            logger.warn('WebSocket connection lost, will attempt to resubscribe');
-            this.isConnected = false;
-          }
-        });
+        // Health check with timeout
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Health check timeout')), 10000)
+        );
+
+        const healthPromise = this.connection.getSlot();
+        
+        await Promise.race([healthPromise, timeoutPromise]);
+
+        if (!this.isConnected) {
+          logger.info('WebSocket connection restored, resubscribing to wallets');
+          this.isConnected = true;
+          consecutiveFailures = 0;
+          await this.resubscribeAllWallets();
+        }
       } catch (error) {
+        consecutiveFailures++;
+        let lastErr = error instanceof Error ? error.message : 'Unknown error'
         if (this.isConnected) {
-          logger.error('Connection monitoring error', { error });
+          logger.warn('WebSocket connection lost, will attempt to resubscribe', {
+            consecutiveFailures,
+            error: sanitizeErrorMessage(lastErr)
+          });
           this.isConnected = false;
         }
+
+        // If too many consecutive failures, try to recreate connection
+        if (consecutiveFailures >= maxFailures) {
+          logger.error('Too many consecutive connection failures, recreating connection');
+          await this.recreateConnection();
+          consecutiveFailures = 0;
+        }
       }
-    }, 30000); 
+    };
+
+    // Check connection every 30 seconds instead of more frequent checks
+    setInterval(healthCheck, 30000);
+  }
+
+  private async recreateConnection(): Promise<void> {
+    try {
+      // Create new connection
+      const connectionConfig: ConnectionConfig = {
+        commitment: 'confirmed',
+        fetch: fetch as any,
+      };
+
+      this.connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
+      this.isConnected = true;
+      
+      logger.info('Connection recreated successfully');
+      
+      // Resubscribe to all wallets
+      await this.resubscribeAllWallets();
+    } catch (error) {
+      logger.error('Failed to recreate connection', {
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+    }
   }
 
   private async resubscribeAllWallets(): Promise<void> {
@@ -340,25 +388,55 @@ export class WalletManagementService {
     }
   }
 
-  async getWalletBalance(address: string): Promise<number> {
-    try {
-      const publicKey = new PublicKey(address);
-      const balance = await this.connection.getBalance(publicKey);
-      const solBalance = lamportsToSol(balance);
+  async getWalletBalance(walletAddress: string): Promise<number> {
+    const maxRetries = 3;
+    let lastError: Error | null = null;
 
-      // Update balance in database
-      await this.updateWalletBalance(address, solBalance);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const publicKey = new PublicKey(walletAddress);
+        const balance = await this.connection.getBalance(publicKey, 'confirmed');
+        
+        // Cache the balance
+        const balanceInSol = lamportsToSol(balance);
+        this.walletCache.set(walletAddress, { 
+          ...this.walletCache.get(walletAddress),
+          balance: balanceInSol,
+          lastUpdated: new Date()
+        } as WalletInfo);
 
-      logger.debug('Wallet balance retrieved', { address, balance: solBalance });
-      return solBalance;
-
-    } catch (error) {
-      logger.error('Failed to get wallet balance', {
-        address,
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-      return 0;
+        return balanceInSol;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error('Unknown error');
+        
+        if (attempt < maxRetries) {
+          const delay = 1000 * attempt; // Increasing delay
+          logger.warn(`Failed to get wallet balance, retrying in ${delay}ms`, {
+            address: walletAddress,
+            attempt,
+            error: lastError.message
+          });
+          await new Promise(resolve => setTimeout(resolve, delay));
+        }
+      }
     }
+
+    logger.error('Failed to get wallet balance after all retries', {
+      address: walletAddress,
+      error: lastError?.message
+    });
+
+    // Return cached balance if available
+    const cached = this.walletCache.get(walletAddress);
+    if (cached?.balance !== undefined) {
+      logger.warn('Returning cached balance due to RPC failure', {
+        address: walletAddress,
+        cachedBalance: cached.balance
+      });
+      return cached.balance;
+    }
+
+    throw lastError || new Error('Failed to get wallet balance');
   }
 
   async getTokenBalance(walletAddress: string, tokenMintAddress: string, rawAmount = false): Promise<number> {

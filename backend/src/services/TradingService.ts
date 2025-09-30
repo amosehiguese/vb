@@ -1,4 +1,4 @@
-import { Connection, VersionedTransaction } from '@solana/web3.js';
+import { Connection, ConnectionConfig, VersionedTransaction } from '@solana/web3.js';
 import axios, { AxiosInstance } from 'axios';
 import { logger } from '../config/logger';
 import { env } from '../config/environment';
@@ -18,16 +18,21 @@ import {
   DEX_CONFIG,
   API_CONFIG,
   TRADING_CONSTANTS,
-  SOLANA_CONSTANTS
 } from '../utils/constants';
 import { createError } from '../middleware/errorHandler';
+import fetch from 'node-fetch'; 
 
 export class TradingService {
   private connection: Connection;
   private jupiterApi: AxiosInstance;
 
   constructor() {
-    this.connection = new Connection(env.SOLANA_RPC_URL, SOLANA_CONSTANTS.CONFIRMATION_COMMITMENT);
+    const connectionConfig: ConnectionConfig = {
+      commitment: 'confirmed',
+      fetch: fetch as any,
+    };
+    
+    this.connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
     
     this.jupiterApi = axios.create({
       baseURL: DEX_CONFIG.JUPITER.api_url,
@@ -38,46 +43,112 @@ export class TradingService {
       }
     });
   }
-
+  
   async executeTrade(tradeParams: TradeParams): Promise<TradeResult> {
     const startTime = new Date();
-
+  
     try {
       logger.info('Executing trade', {
         sessionId: tradeParams.sessionId,
         type: tradeParams.type,
         amount: tradeParams.amount,
         dex: tradeParams.dex,
-        slippage: tradeParams.slippage
+        initialSlippage: tradeParams.slippage
       });
-
+  
       // Validate trade parameters
       this.validateTradeParams(tradeParams);
-
-      // Get quote from Jupiter
-      const quote = await this.getJupiterQuote(tradeParams);
-      if (!quote) {
-        return this.createFailedTradeResult(startTime, 'Failed to get quote', tradeParams.amount);
-      }
-
-      // Execute swap
-      const swapResult = await this.executeJupiterSwap(tradeParams, quote);
+  
+      // Try trade with adaptive slippage
+      let currentSlippage = tradeParams.slippage;
+      let lastError = '';
       
-      if (swapResult.success && swapResult.signature) {
-        return {
-          success: true,
-          signature: swapResult.signature,
-          amountIn: tradeParams.amount,
-          amountOut: swapResult.amountOut,
-          priceImpact: swapResult.priceImpact,
-          actualSlippage: this.calculateActualSlippage(tradeParams.amount, swapResult.amountOut, quote),
-          fees: this.calculateTradingFees(tradeParams.amount),
-          timestamp: startTime
-        };
-      } else {
-        return this.createFailedTradeResult(startTime, swapResult.error || 'Swap execution failed', tradeParams.amount);
+      while (currentSlippage <= TRADING_CONSTANTS.MAX_SLIPPAGE) {
+        try {
+          logger.debug('Attempting trade with slippage', {
+            sessionId: tradeParams.sessionId,
+            slippage: currentSlippage
+          });
+  
+          // Get quote with current slippage
+          const quote = await this.getJupiterQuote({
+            ...tradeParams,
+            slippage: currentSlippage
+          });
+  
+          if (!quote) {
+            lastError = 'Failed to get quote';
+            break; // No point retrying if quote fails
+          }
+  
+          // Execute swap
+          const swapResult = await this.executeJupiterSwap({
+            ...tradeParams,
+            slippage: currentSlippage
+          }, quote);
+          
+          if (swapResult.success && swapResult.signature) {
+            // Success! Log if we had to increase slippage
+            if (currentSlippage > tradeParams.slippage) {
+              logger.info('Trade succeeded with increased slippage', {
+                sessionId: tradeParams.sessionId,
+                originalSlippage: tradeParams.slippage,
+                successfulSlippage: currentSlippage,
+                attemptsNeeded: Math.ceil((currentSlippage - tradeParams.slippage) / TRADING_CONSTANTS.SLIPPAGE_INCREMENT) + 1
+              });
+            }
+  
+            return {
+              success: true,
+              signature: swapResult.signature,
+              amountIn: tradeParams.amount,
+              amountOut: swapResult.amountOut,
+              priceImpact: swapResult.priceImpact,
+              actualSlippage: this.calculateActualSlippage(tradeParams.amount, swapResult.amountOut, quote),
+              fees: this.calculateTradingFees(tradeParams.amount),
+              timestamp: startTime
+            };
+          } else {
+            lastError = swapResult.error || 'Swap execution failed';
+            
+            // Check if we should retry with higher slippage
+            if (this.shouldRetryWithHigherSlippage(lastError)) {
+              currentSlippage += TRADING_CONSTANTS.SLIPPAGE_INCREMENT;
+              
+              logger.warn('Trade failed, retrying with higher slippage', {
+                sessionId: tradeParams.sessionId,
+                error: lastError,
+                newSlippage: currentSlippage,
+                maxSlippage: TRADING_CONSTANTS.MAX_SLIPPAGE
+              });
+              
+              continue; // Retry with higher slippage
+            } else {
+              break; // Error not related to slippage, don't retry
+            }
+          }
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : 'Unknown error';
+          
+          if (this.shouldRetryWithHigherSlippage(lastError)) {
+            currentSlippage += TRADING_CONSTANTS.SLIPPAGE_INCREMENT;
+            continue;
+          } else {
+            break;
+          }
+        }
       }
-
+  
+      // All retries failed
+      logger.error('Trade failed after all slippage retries', {
+        sessionId: tradeParams.sessionId,
+        finalSlippage: currentSlippage - TRADING_CONSTANTS.SLIPPAGE_INCREMENT,
+        maxSlippage: TRADING_CONSTANTS.MAX_SLIPPAGE,
+        lastError
+      });
+  
+      return this.createFailedTradeResult(startTime, lastError, tradeParams.amount);
+  
     } catch (error) {
       logger.error('Trade execution failed', {
         sessionId: tradeParams.sessionId,
@@ -88,7 +159,7 @@ export class TradingService {
           dex: tradeParams.dex
         }
       });
-
+  
       return this.createFailedTradeResult(
         startTime, 
         error instanceof Error ? error.message : 'Unknown error',
@@ -97,6 +168,22 @@ export class TradingService {
     }
   }
 
+  private shouldRetryWithHigherSlippage(errorMessage: string): boolean {
+    const retryableErrors = [
+      'NO_ROUTES_FOUND',
+      'custom program error: 1',
+      'slippage',
+      'price impact',
+      'insufficient liquidity',
+      'bonding curve',
+      'Slippage exceeded'
+    ];
+  
+    const lowerError = errorMessage.toLowerCase();
+    return retryableErrors.some(error => lowerError.includes(error.toLowerCase()));
+  }
+  
+  
   async validateTradeability(tokenAddress: string, dex: DexType = DexType.JUPITER): Promise<boolean> {
     try {
       logger.debug('Validating token tradeability', { tokenAddress, dex });
@@ -366,14 +453,22 @@ export class TradingService {
       });
 
       const priceData = response.data?.data?.[tokenAddress];
-      return priceData?.price || 0;
+      const price = priceData?.price || 0
+
+      if (price === 0) {
+        logger.warn('Price API returned 0, using fallback', { tokenAddress });
+        // Use fallback price source or default value
+        return tokenAddress === 'So11111111111111111111111111111111111111112' ? TRADING_CONSTANTS.SOL_PRICE : 0;
+      }
+
+      return price;
 
     } catch (error) {
       logger.error('Failed to get token price', {
         tokenAddress,
         error: error instanceof Error ? error.message : 'Unknown error'
       });
-      return 0;
+      return tokenAddress === 'So11111111111111111111111111111111111111112' ? TRADING_CONSTANTS.SOL_PRICE : 0;
     }
   }
 
