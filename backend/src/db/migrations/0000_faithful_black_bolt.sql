@@ -1,28 +1,26 @@
-CREATE TABLE "bot_metrics" (
-	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
-	"date" timestamp DEFAULT now(),
-	"total_sessions" integer DEFAULT 0,
-	"active_sessions" integer DEFAULT 0,
-	"total_volume" numeric(18, 2) DEFAULT '0',
-	"total_revenue" numeric(18, 9) DEFAULT '0',
-	"total_trades" integer DEFAULT 0,
-	"successful_trades" integer DEFAULT 0,
-	"failed_trades" integer DEFAULT 0,
-	"average_trade_size" numeric(18, 9) DEFAULT '0',
-	"unique_tokens_traded" integer DEFAULT 0,
-	"privileged_wallets_count" integer DEFAULT 0,
-	"created_at" timestamp DEFAULT now()
-);
---> statement-breakpoint
 CREATE TABLE "ephemeral_wallets" (
 	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
 	"session_id" varchar(255) NOT NULL,
 	"wallet_address" varchar(44) NOT NULL,
 	"private_key" text NOT NULL,
 	"status" varchar(20) DEFAULT 'created',
+	"sweep_attempts" integer DEFAULT 0,
+	"last_sweep_attempt" timestamp,
+	"sweep_error" text,
 	"created_at" timestamp DEFAULT now(),
 	"updated_at" timestamp DEFAULT now(),
 	CONSTRAINT "ephemeral_wallets_wallet_address_unique" UNIQUE("wallet_address")
+);
+--> statement-breakpoint
+CREATE TABLE "session_events" (
+	"id" uuid PRIMARY KEY DEFAULT gen_random_uuid() NOT NULL,
+	"session_id" varchar(255) NOT NULL,
+	"event_type" varchar(50) NOT NULL,
+	"event_data" jsonb,
+	"status" varchar(20) DEFAULT 'completed',
+	"signature" varchar(88),
+	"error_message" text,
+	"created_at" timestamp DEFAULT now()
 );
 --> statement-breakpoint
 CREATE TABLE "tokens" (

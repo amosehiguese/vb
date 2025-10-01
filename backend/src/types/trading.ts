@@ -139,7 +139,8 @@ export interface BalanceSnapshot {
 
 export enum TradeType {
   BUY = 'buy',
-  SELL = 'sell'
+  SELL = 'sell',
+  UNKNOWN = 'unknown'
 }
 
 export enum DexType {

@@ -1,4 +1,5 @@
 import express from 'express';
+import { Express } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -8,6 +9,8 @@ import { errorHandler } from './middleware/errorHandler';
 import { logger } from './config/logger';
 import { env, isDevelopment, isProduction } from './config/environment';
 import { databaseManager } from './config/database';
+import { Server as HTTPServer, createServer } from 'http';
+import { setupWebSocket } from './config/websocket';
 
 export const createApp = () => {
   const app = express();
@@ -218,6 +221,12 @@ export const createApp = () => {
 
   return app;
 };
+
+export const createServerWithWebSocket = (app: Express): HTTPServer  => {
+  const httpServer = createServer(app);
+  setupWebSocket(httpServer);
+  return httpServer;
+}
 
 // Graceful shutdown handler
 export const setupGracefulShutdown = (server: any) => {

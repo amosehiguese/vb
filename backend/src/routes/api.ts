@@ -1,6 +1,8 @@
 import { Router } from 'express';
 import { TokenController } from '../controllers/TokenController';
 import { SessionController } from '../controllers/SessionController';
+import { EventsController } from '../controllers/EventsController';  
+import { RecoveryController } from '../controllers/RecoveryController';  
 import { 
   validateTokenInput, 
   validateSessionInput,
@@ -13,6 +15,8 @@ const router = Router();
 // Initialize controllers
 const tokenController = new TokenController();
 const sessionController = new SessionController();
+const eventsController = new EventsController();  
+const recoveryController = new RecoveryController(); 
 
 // Request logging middleware for API routes
 router.use((req, res, next) => {
@@ -56,6 +60,15 @@ router.post('/session/:sessionId/stop', sessionController.stopSession);
 router.get('/session/:sessionId/validate', sessionController.validateSession);
 
 router.get('/session/health', sessionController.getSessionServiceHealth);
+
+router.get('/events/:sessionId', eventsController.getSessionEvents);
+
+router.get('/events/:sessionId/recent', eventsController.getRecentEvents);
+
+router.get('/recovery/:sessionId', recoveryController.getRecoveryStatus);
+
+router.post('/recovery/:sessionId/sweep', recoveryController.triggerManualSweep);
+
 
 // API health check
 router.get('/health', (req, res) => {
@@ -103,6 +116,24 @@ router.get('/docs', (req, res) => {
       'POST /api/session/:sessionId/stop': {
         description: 'Stop auto-trading and complete the session',
         body: { reason: 'string' }
+      },
+      'GET /api/events/:sessionId': {
+        description: 'Get all events for a session (with optional limit)',
+        query: { limit: 'number (default: 50)' },
+        response: 'Array of session events'
+      },
+      'GET /api/events/:sessionId/recent': {
+        description: 'Get recent events since a timestamp',
+        query: { since: 'ISO timestamp (default: 1 hour ago)' },
+        response: 'Array of recent session events'
+      },
+      'GET /api/recovery/:sessionId': {
+        description: 'Check recovery status for stranded funds',
+        response: 'Recovery status with ephemeral wallets info'
+      },
+      'POST /api/recovery/:sessionId/sweep': {
+        description: 'Manually trigger fund recovery sweep',
+        response: 'Sweep results for all unswept wallets'
       },
       'GET /api/health': {
         description: 'API health check endpoint'

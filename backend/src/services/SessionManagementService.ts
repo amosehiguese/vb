@@ -23,6 +23,8 @@ import { createError } from '../middleware/errorHandler';
 import { TokenValidationService } from './TokenValidationService';
 import { WalletManagementService } from './WalletManagementService';
 import { AutoTradingService } from './AutoTradingService';
+import { eventService } from './EventService';
+import { SessionEventType } from '../types/events';
 
 export class SessionManagementService {
   private tokenValidationService: TokenValidationService;
@@ -405,6 +407,16 @@ export class SessionManagementService {
 
       // Detect funding source and update privilege status
       await this.walletManagementService.updateSessionPrivilegeStatus(sessionId, session.wallet.address);
+
+      await eventService.emitSessionEvent({
+        sessionId,
+        eventType: SessionEventType.FUNDING_DETECTED,
+        eventData: {
+          balance,
+          funderAddress: await this.walletManagementService.detectFundingSource(session.wallet.address),
+          timestamp: new Date()
+        }
+      });
       
       // Get updated session with new privilege status
       const updatedSession = await this.getSession(sessionId);
@@ -429,6 +441,16 @@ export class SessionManagementService {
           // Calculate remaining balance for trading (75% of original)
           const tradingBalance = totalFundedAmount - revenueTransfer.revenueAmount;
 
+          await eventService.emitSessionEvent({
+            sessionId,
+            eventType: SessionEventType.REVENUE_TRANSFERRED,
+            eventData: {
+              amount: revenueTransfer.revenueAmount,
+              signature: revenueTransfer.signature,
+              remainingBalance: tradingBalance
+            }
+          });
+
           // Update session to FUNDED status
           await this.updateSessionStatus(sessionId, SessionStatus.FUNDED, {
             fundedAt: new Date(),
@@ -441,6 +463,16 @@ export class SessionManagementService {
 
           // Start trading with the remaining 75%
           await this.autoTradingService.startAutoTrading(sessionId);
+
+          await eventService.emitSessionEvent({
+            sessionId,
+            eventType: SessionEventType.TRADING_STARTED,
+            eventData: {
+              initialBalance: tradingBalance,
+              targetToken: session.contractAddress,
+              tokenSymbol: session.tokenSymbol
+            }
+          });
 
           logger.info('Funding processed: Revenue transferred, trading started', {
             sessionId,

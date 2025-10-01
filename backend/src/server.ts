@@ -3,7 +3,7 @@ import dotenv from 'dotenv';
 // Load environment variables
 dotenv.config();
 
-import { createApp, setupGracefulShutdown } from './app';
+import { createApp, createServerWithWebSocket, setupGracefulShutdown } from './app';
 import { logger } from './config/logger';
 import { env, isDevelopment } from './config/environment';
 import { databaseManager } from './config/database';
@@ -13,6 +13,7 @@ import { ephemeralWallets, userSessions } from './db/schema';
 import { eq } from 'drizzle-orm';
 import { Keypair } from '@solana/web3.js';
 import { delay, retry } from './utils/helpers';
+import { startSweepMonitoringJob } from './jobs/backgroundJobs';
 
 
 // Global error handlers for unhandled promise rejections
@@ -151,12 +152,14 @@ async function startServer() {
 
     // Create Express app
     const app = createApp();
+    const server = createServerWithWebSocket(app);
 
     // Start server
-    const server = app.listen(env.PORT, () => {
+    server.listen(env.PORT, () => {
       logger.info('WubbaVolumeBot backend server started', {
         port: env.PORT,
         environment: env.NODE_ENV,
+        websocket: 'enabled',
         nodeVersion: process.version,
         pid: process.pid,
         timestamp: new Date().toISOString()
@@ -182,6 +185,9 @@ async function startServer() {
 
     // Set up graceful shutdown
     setupGracefulShutdown(server);
+
+    // Start background sweep monitoring job
+    startSweepMonitoringJob();
 
     // Log successful startup
     logger.info('Server initialization completed successfully');

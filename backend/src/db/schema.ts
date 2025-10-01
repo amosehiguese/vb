@@ -29,12 +29,26 @@ export const userSessions = pgTable('user_sessions', {
   completedAt: timestamp('completed_at')
 });
 
+export const sessionEvents = pgTable('session_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  sessionId: varchar('session_id', { length: 255 }).notNull(),
+  eventType: varchar('event_type', { length: 50 }).notNull(),
+  eventData: jsonb('event_data'),
+  status: varchar('status', { length: 20 }).default('completed'),
+  signature: varchar('signature', { length: 88 }),
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at').defaultNow()
+});
+
 export const ephemeralWallets = pgTable('ephemeral_wallets', {
   id: uuid('id').primaryKey().defaultRandom(),
   sessionId: varchar('session_id', { length: 255 }).notNull(),
   walletAddress: varchar('wallet_address', { length: 44 }).notNull().unique(),
   privateKey: text('private_key').notNull(), // Encrypted
   status: varchar('status', { length: 20 }).default('created'), // created, funded, swept, failed
+  sweepAttempts: integer('sweep_attempts').default(0),
+  lastSweepAttempt: timestamp('last_sweep_attempt'),
+  sweepError: text('sweep_error'),
   createdAt: timestamp('created_at').defaultNow(),
   updatedAt: timestamp('updated_at').defaultNow()
 });
@@ -88,22 +102,6 @@ export const walletBalances = pgTable('wallet_balances', {
   lastUpdated: timestamp('last_updated').defaultNow()
 });
 
-export const botMetrics = pgTable('bot_metrics', {
-  id: uuid('id').primaryKey().defaultRandom(),
-  date: timestamp('date').defaultNow(),
-  totalSessions: integer('total_sessions').default(0),
-  activeSessions: integer('active_sessions').default(0),
-  totalVolume: decimal('total_volume', { precision: 18, scale: 2 }).default('0'),
-  totalRevenue: decimal('total_revenue', { precision: 18, scale: 9 }).default('0'),
-  totalTrades: integer('total_trades').default(0),
-  successfulTrades: integer('successful_trades').default(0),
-  failedTrades: integer('failed_trades').default(0),
-  averageTradeSize: decimal('average_trade_size', { precision: 18, scale: 9 }).default('0'),
-  uniqueTokensTraded: integer('unique_tokens_traded').default(0),
-  privilegedWalletsCount: integer('privileged_wallets_count').default(0),
-  createdAt: timestamp('created_at').defaultNow()
-});
-
 // Relations
 export const userSessionsRelations = relations(userSessions, ({ one, many }) => ({
   token: one(tokens, {
@@ -144,5 +142,3 @@ export type Transaction = typeof transactions.$inferSelect;
 export type NewTransaction = typeof transactions.$inferInsert;
 export type WalletBalance = typeof walletBalances.$inferSelect;
 export type NewWalletBalance = typeof walletBalances.$inferInsert;
-export type BotMetric = typeof botMetrics.$inferSelect;
-export type NewBotMetric = typeof botMetrics.$inferInsert;

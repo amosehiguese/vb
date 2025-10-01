@@ -29,6 +29,8 @@ import { TradingService } from './TradingService';
 import { Connection, ConnectionConfig, Keypair, PublicKey } from "@solana/web3.js";
 import { getOrCreateAssociatedTokenAccount } from '@solana/spl-token';
 import { env } from '../config/environment';
+import { eventService } from './EventService';
+import { SessionEventType } from '../types/events';
 
 export class AutoTradingService {
   private _sessionManagementService: any = null;
@@ -138,6 +140,17 @@ export class AutoTradingService {
 
     // Update session status
     await this.updateSessionStatus(sessionId, SessionStatus.STOPPED);
+
+    const finalSession = await this.getSessionFromDatabase(sessionId);
+    await eventService.emitSessionEvent({
+      sessionId,
+      eventType: SessionEventType.SESSION_STOPPED,
+      eventData: {
+        finalBalance: parseFloat(finalSession?.currentBalance || '0'),
+        totalTrades: finalSession?.tradesCount || 0,
+        stoppedAt: new Date()
+      }
+    });
     
     logger.info('Auto-trading stopped successfully', { sessionId, reason });
   }
@@ -206,6 +219,16 @@ export class AutoTradingService {
     // Update session status to paused
     await this.updateSessionStatus(sessionId, SessionStatus.PAUSED);
     
+    await eventService.emitSessionEvent({
+      sessionId,
+      eventType: SessionEventType.SESSION_PAUSED,
+      eventData: {
+        currentBalance,
+        totalTrades: session.tradesCount || 0,
+        pausedAt: new Date()
+      }
+    });
+
     logger.info('Auto-trading paused successfully', { 
       sessionId, 
       reason, 
@@ -278,6 +301,15 @@ export class AutoTradingService {
 
     // Start the trading loop
     await this.startAutoTrading(sessionId);
+
+    await eventService.emitSessionEvent({
+      sessionId,
+      eventType: SessionEventType.SESSION_RESUMED,
+      eventData: {
+        currentBalance,
+        resumedAt: new Date()
+      }
+    });
     
     logger.info('Auto-trading resumed successfully', { 
       sessionId, 
@@ -401,6 +433,7 @@ export class AutoTradingService {
     const vaultWallet = await this.walletManagementService.getWalletByAddress(session.walletAddress);
     if (!vaultWallet || !vaultWallet.keypair) { logger.error('Vault keypair not found', { sessionId }); return false; }
 
+    let nextTradeType: TradeType = TradeType.UNKNOWN;
     try {
         const vaultBalance = await this.walletManagementService.getWalletBalance(vaultWallet.address);
         logger.debug('Trading cycle started', {
@@ -431,7 +464,7 @@ export class AutoTradingService {
         }
 
         // Determine next action based on last trade
-        let nextTradeType = await this.determineNextTradeType(sessionId, session);
+        nextTradeType = await this.determineNextTradeType(sessionId, session);
 
         if (nextTradeType === TradeType.BUY) {
           const solPrice = await this.getTokenPrice('So11111111111111111111111111111111111111112');
@@ -462,9 +495,29 @@ export class AutoTradingService {
         }
 
         ephemeralKeypair = await this.walletManagementService.createAndStoreEphemeralWallet(sessionId);
+
+        await eventService.emitSessionEvent({
+          sessionId,
+          eventType: SessionEventType.EPHEMERAL_CREATED,
+          eventData: {
+            address: ephemeralKeypair.publicKey.toString(),
+            purpose: nextTradeType === TradeType.BUY ? 'buy_cycle' : 'sell_cycle'
+          }
+        });
+
         let tradeResult: TradeResult;
 
         if (nextTradeType === TradeType.BUY) {
+          await eventService.emitSessionEvent({
+            sessionId,
+            eventType: SessionEventType.TRADE_EXECUTING,
+            eventData: {
+              type: nextTradeType,
+              dex: 'jupiter',
+              amountIn: 0, // Will be calculated in execute cycle
+              estimatedOutput: 0
+            }
+          });
           tradeResult = await this.executeBuyCycle(session, vaultWallet, ephemeralKeypair);
         }else { // SELL cycle
             // Get the TOTAL token balance from the vault
@@ -475,6 +528,16 @@ export class AutoTradingService {
                 await this.updateLastTradeType(sessionId, TradeType.SELL); // Set to sell so next trade is buy
                 return true; // Return true to avoid failure count incrementing
             }
+            await eventService.emitSessionEvent({
+              sessionId,
+              eventType: SessionEventType.TRADE_EXECUTING,
+              eventData: {
+                type: nextTradeType,
+                dex: 'jupiter',
+                amountIn: 0, // Will be calculated in execute cycle
+                estimatedOutput: 0
+              }
+            });
             tradeResult = await this.executeSellCycle(session, vaultWallet, ephemeralKeypair, vaultTokenBalanceRaw);
         }
 
@@ -484,6 +547,36 @@ export class AutoTradingService {
           await this.updateConsecutiveTradeCount(sessionId, nextTradeType);
 
           const updatedVaultBalance = await this.walletManagementService.getWalletBalance(vaultWallet.address);
+
+          await eventService.emitSessionEvent({
+            sessionId,
+            eventType: SessionEventType.TRADE_COMPLETED,
+            eventData: {
+              type: nextTradeType,
+              signature: tradeResult.signature || '',
+              amountIn: tradeResult.amountIn,
+              amountOut: tradeResult.amountOut,
+              price: tradeResult.priceImpact || 0,
+              success: true
+            },
+            signature: tradeResult.signature
+          });
+          
+        
+          await eventService.emitSessionEvent({
+            sessionId,
+            eventType: SessionEventType.BALANCE_UPDATED,
+            eventData: {
+              currentBalance: updatedVaultBalance,
+              totalTraded: parseFloat(session.totalTraded || '0'),
+              depletionPercentage: calculateDepletionPercentage(
+                parseFloat(session.initialBalance || '0'),
+                updatedVaultBalance
+              ),
+              tradesCount: session.tradesCount || 0
+            }
+          });
+
           if (this._sessionManagementService) {
             await this._sessionManagementService.updateSessionBalance(sessionId, updatedVaultBalance);
           } else {
@@ -500,6 +593,17 @@ export class AutoTradingService {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'An unknown error occurred';
       const errorStack = error instanceof Error ? error.stack : undefined;
+
+      await eventService.emitSessionEvent({
+        sessionId,
+        eventType: SessionEventType.TRADE_FAILED,
+        status: 'failed',
+        eventData: {
+          type: nextTradeType,
+          reason: errorMessage
+        },
+        errorMessage: errorMessage
+      });
 
       logger.error('Error in trading cycle, attempting sweep', { 
           sessionId, 
@@ -559,11 +663,21 @@ export class AutoTradingService {
       totalAmountToSend = tradeSize.solAmount + TRADING_CONSTANTS.ATA_CREATION_FEE_BUFFER + TRADING_CONSTANTS.NETWORK_FEE_BUFFER;
     }
   
-    await this.walletManagementService.transferFunds(
-      vaultWallet.keypair, 
-      ephemeralKeypair.publicKey.toString(), 
+    const fundSignature = await this.walletManagementService.transferFunds(
+      vaultWallet.keypair!,
+      ephemeralKeypair.publicKey.toString(),
       totalAmountToSend
     );
+
+    await eventService.emitSessionEvent({
+      sessionId: session.sessionId,
+      eventType: SessionEventType.EPHEMERAL_FUNDED,
+      eventData: {
+        address: ephemeralKeypair.publicKey.toString(),
+        amount: totalAmountToSend,
+        signature: fundSignature
+      }
+    });
   
     await this.updateTradingStatus(session.sessionId, 'buy_cycle_executing');
     const tradeResult = await this.tradingService.executeTrade({
@@ -671,12 +785,22 @@ export class AutoTradingService {
       solForFees
     );
   
-    await this.walletManagementService.transferToken(
+    const fundSignature = await this.walletManagementService.transferToken(
       vaultWallet.keypair, 
       ephemeralKeypair.publicKey.toString(), 
       session.contractAddress, 
       sellAmount.rawAmount
     );
+
+    await eventService.emitSessionEvent({
+      sessionId: session.sessionId,
+      eventType: SessionEventType.EPHEMERAL_FUNDED,
+      eventData: {
+        address: ephemeralKeypair.publicKey.toString(),
+        amount: sellAmount,
+        signature: fundSignature
+      }
+    });
     
     await this.updateTradingStatus(session.sessionId, 'sell_cycle_executing');
     
