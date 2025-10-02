@@ -1,5 +1,7 @@
 import { z } from 'zod';
 import { FundingTierName } from './session';
+import { TokenMetadata } from './token';
+import { TradingVenue } from './trading';
 
 // Request schemas
 export const validateTokenRequestSchema = z.object({
@@ -26,7 +28,17 @@ export interface TokenValidationResponse {
   liquidityUsd: number;
   pools: PoolInfo[];
   bestPool: BestPoolInfo;
+  availableVenues?: TradingVenue[]; 
   error?: string;
+}
+
+export interface SessionCreationRequest {
+  contractAddress: string;
+  tokenSymbol?: string;
+  tokenName?: string;
+  primaryDex?: string;
+  decimals?: number;
+  fundingTierName: string;
 }
 
 export interface SessionCreationResponse {
@@ -56,6 +68,23 @@ export interface SessionCreationResponse {
   instructions: TradingInstruction[];
   estimatedTrades: number;
   createdAt: Date;
+  error?: string;
+}
+
+export interface SessionStatusResponse {
+  success: boolean;
+  session: {
+    sessionId: string;
+    status: string;
+    walletAddress: string;
+    balance: number;
+    contractAddress: string;
+    tokenSymbol: string;
+    fundingTier: string;
+    autoTradingActive: boolean;
+    createdAt: Date;
+    updatedAt: Date;
+  };
   error?: string;
 }
 
@@ -93,6 +122,33 @@ export interface AutoTradingConfig {
   isPrivileged: boolean;
 }
 
+export interface TradeExecutionRequest {
+  sessionId: string;
+  type: 'buy' | 'sell';
+  amount?: number;
+  slippage?: number;
+}
+
+export interface TradeExecutionResponse {
+  success: boolean;
+  signature?: string;
+  amountIn: number;
+  amountOut: number;
+  priceImpact: number;
+  fees: number;
+  venue?: string; // NEW
+  timestamp: Date;
+  error?: string;
+}
+
+export interface SessionValidationResponse {
+  valid: boolean;
+  session: any;
+  errors: string[];
+  canTrade: boolean;
+  fundingRequired: number;
+}
+
 export interface ApiError {
   success: false;
   error: string;
@@ -100,11 +156,44 @@ export interface ApiError {
   details?: Record<string, any>;
 }
 
+export interface HealthCheckResponse {
+  status: 'healthy' | 'unhealthy';
+  timestamp: Date;
+  uptime: number;
+  version: string;
+  services: {
+    database: 'connected' | 'disconnected';
+    solana: 'connected' | 'disconnected';
+    jupiter: 'connected' | 'disconnected';
+    raydium: 'connected' | 'disconnected'; // NEW
+  };
+}
+
+export interface PaginatedResponse<T> {
+  success: boolean;
+  data: T[];
+  pagination: {
+    page: number;
+    limit: number;
+    total: number;
+    hasMore: boolean;
+  };
+  error?: string;
+}
+
 export interface ApiResponse<T = any> {
   success: boolean;
   data?: T;
   error?: string;
   timestamp?: string;
+}
+
+export interface ErrorResponse {
+  success: false;
+  error: string;
+  code?: string;
+  details?: any;
+  timestamp: Date;
 }
 
 // Request types

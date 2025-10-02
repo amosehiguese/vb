@@ -22,6 +22,7 @@ export interface TradeResult {
   actualSlippage: number;
   fees: number;
   timestamp: Date;
+  venue?: string;
 }
 
 export interface JupiterQuoteResponse {
@@ -40,6 +41,67 @@ export interface JupiterQuoteResponse {
   routePlan: RoutePlan[];
   contextSlot: number;
   timeTaken: number;
+}
+
+export interface TradingVenue {
+  dex: 'jupiter' | 'raydium';
+  tradable: boolean;
+  priority: number;
+  quote?: any;
+}
+
+export interface LiquidityAvailability {
+  tradable: boolean;
+  venues: TradingVenue[];
+  preferredVenue: string | null;
+  error?: string;
+}
+
+export interface RaydiumQuote {
+  poolInfo: any;
+  amountIn: string;
+  amountOut: string;
+  minAmountOut: string;
+  priceImpact: number;
+  venue: 'raydium';
+}
+
+export interface SwapResult {
+  success: boolean;
+  signature?: string;
+  amountOut: number;
+  priceImpact: number;
+  venue?: string;
+  error?: string;
+}
+
+export interface TradingStrategy {
+  name: string;
+  description: string;
+  targetDepletion: number; // Percentage of total balance to use (75%)
+  tradeSizeRange: {
+    min: number;
+    max: number;
+  };
+  intervalRange: {
+    min: number; // milliseconds
+    max: number; // milliseconds  
+  };
+  maxConsecutiveSameTrades: number;
+  emergencyStopConditions: EmergencyStopCondition[];
+}
+
+export interface AutoTradingState {
+  sessionId: string;
+  status: TradingStatus;
+  tradingStatus?: string;
+  isLoopRunning: boolean;
+  currentBalance: number;
+  totalTrades: number;
+  lastTradeAt?: Date;
+  nextTradeAt?: Date;
+  pauseReason?: string;
+  errors: TradingError[];
 }
 
 export interface RoutePlan {

@@ -1,4 +1,4 @@
-import { Connection, ConnectionConfig, VersionedTransaction } from '@solana/web3.js';
+import { Connection, ConnectionConfig, PublicKey, Transaction, TransactionMessage, VersionedTransaction } from '@solana/web3.js';
 import axios, { AxiosInstance } from 'axios';
 import { logger } from '../config/logger';
 import { env } from '../config/environment';
@@ -8,6 +8,7 @@ import {
   TradeType,
   DexType,
   JupiterQuoteResponse,
+  RaydiumQuote,
 } from '../types/trading';
 import {
   solToLamports,
@@ -21,10 +22,17 @@ import {
 } from '../utils/constants';
 import { createError } from '../middleware/errorHandler';
 import fetch from 'node-fetch'; 
+import { Raydium } from '@raydium-io/raydium-sdk-v2';
+import { BN } from '@coral-xyz/anchor';
+import { Percent } from '@raydium-io/raydium-sdk-v2';
+import { userSessions } from '../db/schema';
+import { db } from '../config/database';
+import { eq } from 'drizzle-orm';
 
 export class TradingService {
   private connection: Connection;
   private jupiterApi: AxiosInstance;
+  private raydiumInstance: Raydium | null = null;
 
   constructor() {
     const connectionConfig: ConnectionConfig = {
@@ -43,8 +51,160 @@ export class TradingService {
       }
     });
   }
+
+  private async getRaydiumInstance(): Promise<Raydium> {
+    if (!this.raydiumInstance) {
+      this.raydiumInstance = await Raydium.load({
+        connection: this.connection,
+        cluster: 'mainnet',
+      });
+    }
+    return this.raydiumInstance;
+  }
+
+  private async getSessionFromDatabase(sessionId: string): Promise<any> {
+    try {
+      const sessions = await db.select()
+        .from(userSessions)
+        .where(eq(userSessions.sessionId, sessionId))
+        .limit(1);
+      
+      return sessions[0] || null;
+    } catch (error) {
+      logger.error('Failed to get session from database', { sessionId, error });
+      return null;
+    }
+  }
+
+  private async getRaydiumQuote(tradeParams: TradeParams): Promise<RaydiumQuote | null> {
+    try {
+      const raydium = await this.getRaydiumInstance();
+      
+      const poolInfo = await raydium.api.fetchPoolByMints({
+        mint1: 'So11111111111111111111111111111111111111112',
+        mint2: tradeParams.tokenAddress
+      });
+
+      if (!poolInfo) return null;
+
+      const amountIn = tradeParams.type === TradeType.BUY 
+        ? solToLamports(tradeParams.amount)
+        : Math.floor(tradeParams.amount * Math.pow(10, 9));
+
+      const quote = await raydium.liquidity.computeAmountOut({
+        poolInfo: poolInfo as any,
+        amountIn: new BN(amountIn),
+        mintIn: tradeParams.type === TradeType.BUY 
+          ? 'So11111111111111111111111111111111111111112'
+          : tradeParams.tokenAddress,
+        mintOut: tradeParams.type === TradeType.BUY 
+          ? tradeParams.tokenAddress
+          : 'So11111111111111111111111111111111111111112',
+        slippage: Math.floor(tradeParams.slippage * 100) / 10000 
+      });
+
+      return {
+        poolInfo,
+        amountIn: amountIn.toString(),
+        amountOut: quote.amountOut.toString(),
+        minAmountOut: quote.minAmountOut.toString(),
+        priceImpact: parseFloat(quote.priceImpact.toFixed()),
+        venue: 'raydium'
+      };
+
+    } catch (error) {
+      logger.error('Raydium quote failed', {
+        sessionId: tradeParams.sessionId,
+        error: error instanceof Error ? error.message : 'Unknown error'
+      });
+      return null;
+    }
+  }
+
+  private async convertLegacyToVersionedTx(
+    legacyTransaction: Transaction,
+    connection: Connection,
+    feePayer: PublicKey
+  ): Promise<VersionedTransaction> {
+    // 1. Fetch the latest blockhash
+    const latestBlockhash = await connection.getLatestBlockhash('confirmed');
+
+    // 2. Create a TransactionMessage from the legacy transaction's instructions
+    const messageV0 = new TransactionMessage({
+      payerKey: feePayer,
+      recentBlockhash: latestBlockhash.blockhash,
+      instructions: legacyTransaction.instructions, // Extract instructions from the legacy tx
+    }).compileToV0Message(); // Compile the message into version 0 format
+
+    // 3. Create a new VersionedTransaction
+    const versionedTransaction = new VersionedTransaction(messageV0);
+
+    return versionedTransaction;
+  }
+
+  private async executeRaydiumSwap(
+    tradeParams: TradeParams,
+    quote: RaydiumQuote
+  ): Promise<any> {
+    try {
+      const raydium = await this.getRaydiumInstance();
   
-  async executeTrade(tradeParams: TradeParams): Promise<TradeResult> {
+      // Build the swap instruction using Raydium SDK
+      const swapTx = await raydium.liquidity.swap({
+        poolInfo: quote.poolInfo,
+        amountIn: new BN(quote.amountIn),
+        amountOut: new BN(quote.minAmountOut),
+        fixedSide: 'in',
+        txVersion: 0, // use 0 for versioned transactions
+        feePayer: tradeParams.walletKeypair.publicKey,
+        inputMint: tradeParams.tokenAddress,
+      });
+  
+      // Convert TxBuildData into a real Transaction
+      const buildResult = await swapTx.builder.build();
+  
+      // This is the actual VersionedTransaction object that can be signed.
+      const transaction: VersionedTransaction = await this.convertLegacyToVersionedTx(buildResult.transaction, this.connection, tradeParams.walletKeypair.publicKey);
+  
+      // Sign with your wallet Keypair
+      transaction.sign([tradeParams.walletKeypair]);
+  
+      // Send the signed transaction
+      const signature = await this.connection.sendTransaction(transaction, {
+        skipPreflight: true,
+        maxRetries: 2,
+      });
+  
+      const latestBlockhash = await this.connection.getLatestBlockhash();
+      await this.connection.confirmTransaction(
+        {
+          signature,
+          blockhash: latestBlockhash.blockhash,
+          lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
+        },
+        'confirmed'
+      );
+  
+      return {
+        success: true,
+        signature,
+        amountOut: lamportsToSol(parseInt(quote.amountOut)),
+        priceImpact: quote.priceImpact,
+        venue: 'raydium',
+      };
+    } catch (error) {
+      console.error("Raydium swap execution failed:", error); // It's good practice to log the full error
+      return {
+        success: false,
+        amountOut: 0,
+        priceImpact: quote.priceImpact,
+        error: error instanceof Error ? error.message : 'Raydium swap failed',
+        venue: 'raydium',
+      };
+    }
+  }
+  
+  async executeJupiterTrade(tradeParams: TradeParams): Promise<TradeResult> {
     const startTime = new Date();
   
     try {
@@ -162,6 +322,87 @@ export class TradingService {
   
       return this.createFailedTradeResult(
         startTime, 
+        error instanceof Error ? error.message : 'Unknown error',
+        tradeParams.amount
+      );
+    }
+  }
+
+  async executeTrade(tradeParams: TradeParams): Promise<TradeResult> {
+    try {
+      logger.info('Executing trade with venue selection', {
+        sessionId: tradeParams.sessionId,
+        type: tradeParams.type,
+        amount: tradeParams.amount
+      });
+
+      // Get session to check preferred venue
+      const session = await this.getSessionFromDatabase(tradeParams.sessionId);
+      const preferredVenue = session?.preferred_venue || 'jupiter';
+
+      // Try Jupiter first
+      try {
+        const jupiterResult = await this.executeJupiterTrade(tradeParams);
+        if (jupiterResult.success) {
+          logger.info('Trade successful on Jupiter', { 
+            sessionId: tradeParams.sessionId,
+            signature: jupiterResult.signature 
+          });
+          return jupiterResult;
+        }
+        
+        logger.warn('Jupiter trade failed, trying Raydium fallback', {
+          sessionId: tradeParams.sessionId,
+          error: jupiterResult.error
+        });
+      } catch (error) {
+        logger.warn('Jupiter trade threw error, trying Raydium fallback', {
+          sessionId: tradeParams.sessionId,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+
+      // Try Raydium as fallback
+      try {
+        const raydiumQuote = await this.getRaydiumQuote(tradeParams);
+        if (raydiumQuote) {
+          const raydiumResult = await this.executeRaydiumSwap(tradeParams, raydiumQuote);
+          if (raydiumResult.success) {
+            logger.info('Trade successful on Raydium fallback', {
+              sessionId: tradeParams.sessionId,
+              signature: raydiumResult.signature
+            });
+            
+            return {
+              success: true,
+              signature: raydiumResult.signature,
+              amountIn: tradeParams.amount,
+              amountOut: raydiumResult.amountOut,
+              priceImpact: raydiumResult.priceImpact,
+              actualSlippage: raydiumResult.priceImpact,
+              fees: this.calculateTradingFees(tradeParams.amount),
+              timestamp: new Date(),
+              venue: 'raydium'
+            };
+          }
+        }
+      } catch (error) {
+        logger.error('Raydium fallback also failed', {
+          sessionId: tradeParams.sessionId,
+          error: error instanceof Error ? error.message : 'Unknown error'
+        });
+      }
+
+      // Both venues failed
+      return this.createFailedTradeResult(
+        new Date(),
+        'All trading venues failed',
+        tradeParams.amount
+      );
+
+    } catch (error) {
+      return this.createFailedTradeResult(
+        new Date(),
         error instanceof Error ? error.message : 'Unknown error',
         tradeParams.amount
       );

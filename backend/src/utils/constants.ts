@@ -19,7 +19,7 @@ export const TRADING_CONSTANTS = {
   REVENUE_PERCENTAGE: env.REVENUE_PERCENTAGE,
   TARGET_DEPLETION: 75, // 75%
   TRADING_BALANCE_DEPLETION_TARGET: 95, 
-  DEFAULT_SLIPPAGE: 10, // 10%
+  DEFAULT_SLIPPAGE: 5, // 5%
   MAX_SLIPPAGE: 25,    // 25%
   SLIPPAGE_INCREMENT: 2, 
   MIN_TRADE_USD: 0.50,
@@ -103,6 +103,12 @@ export const DEX_CONFIG = {
     name: 'Dexscreener',
     api_url: 'https://api.dexscreener.com/latest/dex',
     tokens_endpoint: '/tokens'
+  },
+
+  RAYDIUM: {
+    name: 'Raydium',
+    sdk_required: true,
+    priority: 2,
   }
 } as const;
 
@@ -155,6 +161,7 @@ export const ERROR_CODES = {
   TOKEN_NOT_FOUND: 'TOKEN_NOT_FOUND',
   NO_POOLS_FOUND: 'NO_POOLS_FOUND',
   INSUFFICIENT_LIQUIDITY: 'INSUFFICIENT_LIQUIDITY',
+  NO_LIQUIDITY_AVAILABLE: 'NO_LIQUIDITY_AVAILABLE',
   
   // Session Errors
   SESSION_NOT_FOUND: 'SESSION_NOT_FOUND',

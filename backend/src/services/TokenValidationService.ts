@@ -29,11 +29,15 @@ import {
 import { createError } from '../middleware/errorHandler';
 import { db } from '../config/database';
 import { tokens } from '../db/schema';
+import { Raydium, Percent } from '@raydium-io/raydium-sdk-v2';
+import { BN } from '@coral-xyz/anchor';
+import { LiquidityAvailability, TradingVenue } from '../types/trading';
 
 export class TokenValidationService {
   private connection: Connection;
   private jupiterApi: AxiosInstance;
   private dexScreenerApi: AxiosInstance;
+  private raydiumInstance: Raydium | null = null;
 
   constructor() {
     const connectionConfig: ConnectionConfig = {
@@ -60,6 +64,15 @@ export class TokenValidationService {
     });
   }
   
+  private async getRaydiumInstance(): Promise<Raydium> {
+    if (!this.raydiumInstance) {
+      this.raydiumInstance = await Raydium.load({
+        connection: this.connection,
+        cluster: 'mainnet',
+      });
+    }
+    return this.raydiumInstance;
+  }
 
   async validateToken(contractAddress: string): Promise<TokenValidationResponse> {
     try {
@@ -68,6 +81,16 @@ export class TokenValidationService {
       // Basic validation
       if (!isValidSolanaAddress(contractAddress)) {
         throw createError.validation('Invalid contract address format');
+      }
+
+      const liquidityCheck = await this.checkLiquidityAvailability(contractAddress);
+      
+      if (!liquidityCheck.tradable) {
+        return this.createErrorResponse(
+          contractAddress,
+          liquidityCheck.error || 'No liquidity pools found',
+          ERROR_CODES.NO_LIQUIDITY_AVAILABLE
+        );
       }
 
       // Check if token exists on blockchain
@@ -141,7 +164,7 @@ export class TokenValidationService {
           decimals: metadata.decimals,
           supply: metadata.supply
         },
-        primaryDex: bestPool.dex,
+        primaryDex: liquidityCheck.preferredVenue || bestPool.dex,
         liquidityUsd: bestPool.liquidity,
         pools: pools.map(this.mapPoolToApiFormat),
         bestPool: this.mapBestPoolToApiFormat(bestPool)
@@ -172,6 +195,78 @@ export class TokenValidationService {
         'Token validation failed',
         ERROR_CODES.TOKEN_NOT_FOUND
       );
+    }
+  }
+
+  private async checkLiquidityAvailability(contractAddress: string): Promise<LiquidityAvailability> {
+    const venues: TradingVenue[] = [];
+    
+    // Test Jupiter and Raydium quotes in parallel
+    const [jupiterResult, raydiumResult] = await Promise.allSettled([
+      this.testJupiterQuote(contractAddress),
+      this.testRaydiumQuote(contractAddress)
+    ]);
+
+    if (jupiterResult.status === 'fulfilled' && jupiterResult.value) {
+      venues.push({ dex: 'jupiter', tradable: true, priority: 1 });
+    }
+
+    if (raydiumResult.status === 'fulfilled' && raydiumResult.value) {
+      venues.push({ dex: 'raydium', tradable: true, priority: 2 });
+    }
+
+    return {
+      tradable: venues.length > 0,
+      venues,
+      preferredVenue: venues[0]?.dex || null,
+      error: venues.length === 0 ? 'No quotes available from Jupiter or Raydium' : undefined
+    };
+  }
+
+
+  private async testJupiterQuote(contractAddress: string): Promise<boolean> {
+    try {
+      const response = await this.jupiterApi.get(DEX_CONFIG.JUPITER.quote_endpoint, {
+        params: {
+          inputMint: 'So11111111111111111111111111111111111111112',
+          outputMint: contractAddress,
+          amount: 1000000, // 0.001 SOL
+          slippageBps: 1000
+        }
+      });
+
+      return response.data && response.data.outAmount && parseInt(response.data.outAmount) > 0;
+    } catch (error) {
+      logger.debug('Jupiter quote test failed', { contractAddress, error: error instanceof Error ? error.message : 'Unknown error' });
+      return false;
+    }
+  }
+
+
+  private async testRaydiumQuote(contractAddress: string): Promise<boolean> {
+    try {
+      const raydium = await this.getRaydiumInstance();
+
+      const poolResponse = await raydium.api.fetchPoolByMints({
+        mint1: 'So11111111111111111111111111111111111111112',
+        mint2: contractAddress
+      });
+
+      if (!poolResponse.data) return false;
+
+      const poolInfo = poolResponse.data[0];
+      const quote = await raydium.liquidity.computeAmountOut({
+        poolInfo: poolInfo as any,
+        amountIn: new BN(1000000), // 0.001 SOL
+        mintIn: 'So11111111111111111111111111111111111111112',
+        mintOut: contractAddress,
+        slippage: Math.floor(1 * 100)
+      });
+
+      return quote.amountOut.gt(new BN(0));
+    } catch (error) {
+      logger.debug('Raydium quote test failed', { contractAddress, error: error instanceof Error ? error.message : 'Unknown error' });
+      return false;
     }
   }
 
