@@ -6,6 +6,8 @@ const envSchema = z.object({
   SOL_PRICE: z.string().transform(Number).default(212),
   DATABASE_URL: z.string(),
   SOLANA_RPC_URL: z.string().regex(/^https?:\/\/.+/),
+  SOLANA_RPC_URL_BACKUP_1: z.string().regex(/^https?:\/\/.+/),
+  SOLANA_RPC_URL_BACKUP_2: z.string().regex(/^https?:\/\/.+/),
   JUPITER_API_URL: z.string().regex(/^https?:\/\/.+/).default('https://lite-api.jup.ag'),
   COINGECKO_API_URL: z.string().regex(/^https?:\/\/.+/).default('https://api.coingecko.com/api/v3'),
   RAYDIUM_API_URL: z.string().regex(/^https?:\/\/.+/).default('https://api.raydium.io/v2'),

@@ -24,24 +24,17 @@ import { createError } from '../middleware/errorHandler';
 import fetch from 'node-fetch'; 
 import { Raydium } from '@raydium-io/raydium-sdk-v2';
 import { BN } from '@coral-xyz/anchor';
-import { Percent } from '@raydium-io/raydium-sdk-v2';
 import { userSessions } from '../db/schema';
 import { db } from '../config/database';
 import { eq } from 'drizzle-orm';
+import { connectionPool } from './ConnectionPoolService';
 
 export class TradingService {
-  private connection: Connection;
   private jupiterApi: AxiosInstance;
   private raydiumInstance: Raydium | null = null;
 
   constructor() {
-    const connectionConfig: ConnectionConfig = {
-      commitment: 'confirmed',
-      fetch: fetch as any,
-    };
-    
-    this.connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
-    
+
     this.jupiterApi = axios.create({
       baseURL: DEX_CONFIG.JUPITER.api_url,
       timeout: API_CONFIG.REQUEST_TIMEOUT,
@@ -54,8 +47,9 @@ export class TradingService {
 
   private async getRaydiumInstance(): Promise<Raydium> {
     if (!this.raydiumInstance) {
+      const connection = connectionPool.getConnection();
       this.raydiumInstance = await Raydium.load({
-        connection: this.connection,
+        connection: connection,
         cluster: 'mainnet',
       });
     }
@@ -147,6 +141,7 @@ export class TradingService {
     quote: RaydiumQuote
   ): Promise<any> {
     try {
+      const connection = connectionPool.getConnection();
       const raydium = await this.getRaydiumInstance();
   
       // Build the swap instruction using Raydium SDK
@@ -164,19 +159,19 @@ export class TradingService {
       const buildResult = await swapTx.builder.build();
   
       // This is the actual VersionedTransaction object that can be signed.
-      const transaction: VersionedTransaction = await this.convertLegacyToVersionedTx(buildResult.transaction, this.connection, tradeParams.walletKeypair.publicKey);
+      const transaction: VersionedTransaction = await this.convertLegacyToVersionedTx(buildResult.transaction, connection, tradeParams.walletKeypair.publicKey);
   
       // Sign with your wallet Keypair
       transaction.sign([tradeParams.walletKeypair]);
   
       // Send the signed transaction
-      const signature = await this.connection.sendTransaction(transaction, {
+      const signature = await connection.sendTransaction(transaction, {
         skipPreflight: true,
         maxRetries: 2,
       });
   
-      const latestBlockhash = await this.connection.getLatestBlockhash();
-      await this.connection.confirmTransaction(
+      const latestBlockhash = await connection.getLatestBlockhash();
+      await connection.confirmTransaction(
         {
           signature,
           blockhash: latestBlockhash.blockhash,
@@ -206,7 +201,7 @@ export class TradingService {
   
   async executeJupiterTrade(tradeParams: TradeParams): Promise<TradeResult> {
     const startTime = new Date();
-  
+    const connection = connectionPool.getConnection();
     try {
       logger.info('Executing trade', {
         sessionId: tradeParams.sessionId,
@@ -556,6 +551,8 @@ export class TradingService {
     tradeParams: TradeParams, 
     quote: JupiterQuoteResponse
   ): Promise<{ success: boolean; signature?: string; amountOut: number; priceImpact: number; error?: string }> {
+    const connection = connectionPool.getConnection();
+
     try {
       logger.debug('Executing Jupiter swap', {
         sessionId: tradeParams.sessionId,
@@ -599,14 +596,14 @@ export class TradingService {
         const rawTransaction = transaction.serialize();
         
         // Send the raw transaction
-        const txid = await this.connection.sendRawTransaction(rawTransaction, {
+        const txid = await connection.sendRawTransaction(rawTransaction, {
           skipPreflight: true,
           maxRetries: 2
         });
         
         // Confirm the transaction
-        const latestBlockHash = await this.connection.getLatestBlockhash();
-        await this.connection.confirmTransaction({
+        const latestBlockHash = await connection.getLatestBlockhash();
+        await connection.confirmTransaction({
           blockhash: latestBlockHash.blockhash,
           lastValidBlockHeight: latestBlockHash.lastValidBlockHeight,
           signature: txid

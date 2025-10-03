@@ -10,7 +10,7 @@ class EventService extends EventEmitter {
 
   private constructor() {
     super();
-    this.setMaxListeners(100); // Handle many concurrent sessions
+    this.setMaxListeners(5000); // Handle many concurrent sessions
   }
 
   static getInstance(): EventService {

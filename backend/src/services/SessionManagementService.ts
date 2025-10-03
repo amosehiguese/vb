@@ -411,6 +411,7 @@ export class SessionManagementService {
       await eventService.emitSessionEvent({
         sessionId,
         eventType: SessionEventType.FUNDING_DETECTED,
+        status: 'pending', 
         eventData: {
           balance,
           funderAddress: await this.walletManagementService.detectFundingSource(session.wallet.address),

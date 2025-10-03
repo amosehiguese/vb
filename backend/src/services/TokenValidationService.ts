@@ -32,20 +32,14 @@ import { tokens } from '../db/schema';
 import { Raydium, Percent } from '@raydium-io/raydium-sdk-v2';
 import { BN } from '@coral-xyz/anchor';
 import { LiquidityAvailability, TradingVenue } from '../types/trading';
+import { connectionPool } from './ConnectionPoolService';
 
 export class TokenValidationService {
-  private connection: Connection;
   private jupiterApi: AxiosInstance;
   private dexScreenerApi: AxiosInstance;
   private raydiumInstance: Raydium | null = null;
 
   constructor() {
-    const connectionConfig: ConnectionConfig = {
-      commitment: 'confirmed',
-      fetch: fetch as any,
-    };
-    
-    this.connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
 
     this.dexScreenerApi = axios.create({
       baseURL: DEX_CONFIG.DEXSCREENER.api_url,
@@ -66,8 +60,9 @@ export class TokenValidationService {
   
   private async getRaydiumInstance(): Promise<Raydium> {
     if (!this.raydiumInstance) {
+      const connection = connectionPool.getConnection();
       this.raydiumInstance = await Raydium.load({
-        connection: this.connection,
+        connection: connection,
         cluster: 'mainnet',
       });
     }
@@ -75,6 +70,7 @@ export class TokenValidationService {
   }
 
   async validateToken(contractAddress: string): Promise<TokenValidationResponse> {
+
     try {
       logger.info('Starting token validation', { contractAddress });
 
@@ -271,13 +267,14 @@ export class TokenValidationService {
   }
 
   private async checkTokenExists(contractAddress: string): Promise<boolean> {
+    const connection = connectionPool.getConnection();
     const maxRetries = 3;
     let lastError: Error | null = null;
   
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
         const publicKey = new PublicKey(contractAddress);
-        const accountInfo = await this.connection.getAccountInfo(publicKey);
+        const accountInfo = await connection.getAccountInfo(publicKey);
         
         if (attempt > 1) {
           logger.info('Token existence check succeeded after retry', { 
@@ -433,9 +430,10 @@ export class TokenValidationService {
 
 
   private async getTokenSupply(contractAddress: string): Promise<number> {
+    const connection = connectionPool.getConnection();
     try {
       const publicKey = new PublicKey(contractAddress);
-      const supply = await this.connection.getTokenSupply(publicKey);
+      const supply = await connection.getTokenSupply(publicKey);
       return supply.value.uiAmount || 0;
     } catch (error) {
       logger.error('Error getting token supply', { contractAddress, error });

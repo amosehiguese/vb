@@ -93,6 +93,15 @@ export interface APIError extends Error {
       };
       return error;
     },
+
+    sessionNotProperlyFunded: (): APIError => {
+      const error = new Error(
+        'Cannot start trading: Session has not completed the funding process'
+      ) as APIError;
+      error.code = 'SESSION_NOT_PROPERLY_FUNDED';
+      error.statusCode = 400;
+      return error;
+    },
   
     balanceTooLowForPause: (currentBalance: number, minRequired: number): APIError => {
       const error = new Error(

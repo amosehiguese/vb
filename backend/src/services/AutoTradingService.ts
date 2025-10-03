@@ -26,11 +26,11 @@ import {
 import {createError} from '../utils/errors';
 import { WalletManagementService } from './WalletManagementService';
 import { TradingService } from './TradingService';
-import { Connection, ConnectionConfig, Keypair, PublicKey } from "@solana/web3.js";
+import { Keypair, PublicKey } from "@solana/web3.js";
 import { getOrCreateAssociatedTokenAccount } from '@solana/spl-token';
-import { env } from '../config/environment';
 import { eventService } from './EventService';
 import { SessionEventType } from '../types/events';
+import { connectionPool } from './ConnectionPoolService';
 
 export class AutoTradingService {
   private _sessionManagementService: any = null;
@@ -70,6 +70,31 @@ export class AutoTradingService {
     if (this.activeSessions.has(sessionId)) {
         logger.warn('Auto-trading already active for session', { sessionId });
         return;
+    }
+
+    const session = await this.getSessionFromDatabase(sessionId);
+    if (!session) {
+      throw createError.notFound('Session not found', 'SESSION_NOT_FOUND');
+    }
+
+    // Check funding prerequisites
+    if (!session.initialBalance || !session.fundedAt || !session.revenueTransferred) {
+      logger.error('Attempted to start unfunded session', {
+        sessionId,
+        hasInitialBalance: !!session.initialBalance,
+        hasFundedAt: !!session.fundedAt,
+        hasRevenueTransferred: !!session.revenueTransferred
+      });
+      throw createError.sessionNotProperlyFunded();
+    }
+
+    // Session must be FUNDED or PAUSED, not CREATED
+    if (session.status === SessionStatus.CREATED) {
+      throw createError.invalidSessionStatus(
+        session.status,
+        'funded or paused',
+        'start trading'
+      );
     }
     
     logger.info('Starting auto-trading session', { sessionId });
@@ -243,6 +268,13 @@ export class AutoTradingService {
     const session = await this.getSessionFromDatabase(sessionId);
     if (!session) {
       throw createError.notFound('Session not found', 'SESSION_NOT_FOUND');
+    }
+
+    if (!session.initialBalance || !session.fundedAt || !session.revenueTransferred) {
+      throw createError.validation(
+        'Cannot resume: Session never completed funding process',
+        'SESSION_NOT_PROPERLY_FUNDED'
+      );
     }
 
     // Check if session is in a resumeable state
@@ -554,6 +586,7 @@ export class AutoTradingService {
             eventData: {
               type: nextTradeType,
               signature: tradeResult.signature || '',
+              ephemeralWallet: ephemeralKeypair.publicKey.toString(), 
               amountIn: tradeResult.amountIn,
               amountOut: tradeResult.amountOut,
               price: tradeResult.priceImpact || 0,
@@ -600,6 +633,7 @@ export class AutoTradingService {
         status: 'failed',
         eventData: {
           type: nextTradeType,
+          ephemeralWallet: ephemeralKeypair?.publicKey.toString(), 
           reason: errorMessage
         },
         errorMessage: errorMessage
@@ -613,10 +647,10 @@ export class AutoTradingService {
       return false;
     } finally {
         if (ephemeralKeypair) {
-           // Wait 8 seconds for full blockchain settlement
-           await delay(8000); // 8 second delay
+          // Wait 8 seconds for full blockchain settlement
+          await delay(8000); // 8 second delay
             
-            await this.walletManagementService.sweepAssets(ephemeralKeypair, vaultWallet.address, session.contractAddress);
+          await this.walletManagementService.sweepAssets(ephemeralKeypair, vaultWallet.address, session.contractAddress);
         }
     }
   }
@@ -751,12 +785,7 @@ export class AutoTradingService {
     try {
       const mintPublicKey = new PublicKey(session.contractAddress);
       
-      const connectionConfig: ConnectionConfig = {
-        commitment: 'confirmed',
-        fetch: fetch as any,
-      };
-
-      const connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
+      const connection = connectionPool.getConnection();
       const vaultTokenAccount = await getOrCreateAssociatedTokenAccount(
         connection,
         vaultWallet.keypair, // Vault wallet pays for ATA creation

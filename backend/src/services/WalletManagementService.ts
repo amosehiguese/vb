@@ -24,13 +24,18 @@ import {
 } from '../utils/constants';
 import { createError } from '../middleware/errorHandler';
 import fetch from 'node-fetch'; 
+import { connectionPool } from './ConnectionPoolService';
 
 export class WalletManagementService {
-  private connection: Connection;
   private walletCache: Map<string, WalletInfo> = new Map();
   private privilegedWallets: Set<string> = new Set();
 
-  private walletSubscriptions: Map<string, { subscriptionId: number; callback: (balance: number) => void }> = new Map();
+  private walletSubscriptions: Map<string, { 
+    subscriptionId: number; 
+    callback: (balance: number) => void;
+    connectionUrl: string; 
+  }> = new Map();
+
   private subscriptionRetries: Map<string, number> = new Map();
   private isConnected: boolean = true;
 
@@ -41,14 +46,7 @@ export class WalletManagementService {
   );
 
   constructor() {
-    const connectionConfig: ConnectionConfig = {
-      commitment: 'confirmed',
-      fetch: fetch as any, 
-    };
-  
-    this.connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
     this.initializePrivilegedWallets();
-    this.setupConnectionMonitoring();
   }
 
   private initializePrivilegedWallets(): void {
@@ -61,87 +59,6 @@ export class WalletManagementService {
       envPrivilegedWallets.split(',').forEach(address => {
         this.privilegedWallets.add(address.trim());
       });
-    }
-  }
-
-  private setupConnectionMonitoring(): void {
-    let consecutiveFailures = 0;
-    const maxFailures = 5;
-
-    const healthCheck = async () => {
-      try {
-        // Health check with timeout
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Health check timeout')), 10000)
-        );
-
-        const healthPromise = this.connection.getSlot();
-        
-        await Promise.race([healthPromise, timeoutPromise]);
-
-        if (!this.isConnected) {
-          logger.info('WebSocket connection restored, resubscribing to wallets');
-          this.isConnected = true;
-          consecutiveFailures = 0;
-          await this.resubscribeAllWallets();
-        }
-      } catch (error) {
-        consecutiveFailures++;
-        let lastErr = error instanceof Error ? error.message : 'Unknown error'
-        if (this.isConnected) {
-          logger.warn('WebSocket connection lost, will attempt to resubscribe', {
-            consecutiveFailures,
-            error: sanitizeErrorMessage(lastErr)
-          });
-          this.isConnected = false;
-        }
-
-        // If too many consecutive failures, try to recreate connection
-        if (consecutiveFailures >= maxFailures) {
-          logger.error('Too many consecutive connection failures, recreating connection');
-          await this.recreateConnection();
-          consecutiveFailures = 0;
-        }
-      }
-    };
-
-    // Check connection every 30 seconds instead of more frequent checks
-    setInterval(healthCheck, 30000);
-  }
-
-  private async recreateConnection(): Promise<void> {
-    try {
-      // Create new connection
-      const connectionConfig: ConnectionConfig = {
-        commitment: 'confirmed',
-        fetch: fetch as any,
-      };
-
-      this.connection = new Connection(env.SOLANA_RPC_URL, connectionConfig);
-      this.isConnected = true;
-      
-      logger.info('Connection recreated successfully');
-      
-      // Resubscribe to all wallets
-      await this.resubscribeAllWallets();
-    } catch (error) {
-      logger.error('Failed to recreate connection', {
-        error: error instanceof Error ? error.message : 'Unknown error'
-      });
-    }
-  }
-
-  private async resubscribeAllWallets(): Promise<void> {
-    const walletsToResubscribe = Array.from(this.walletSubscriptions.keys());
-    
-    for (const address of walletsToResubscribe) {
-      const subscription = this.walletSubscriptions.get(address);
-      if (subscription) {
-        logger.info('Resubscribing to wallet', { address });
-        // Remove old subscription and create new one
-        await this.stopWalletMonitoring(address);
-        await this.monitorWalletBalance(address, subscription.callback);
-      }
     }
   }
 
@@ -230,7 +147,8 @@ export class WalletManagementService {
             })
         );
 
-        const signature = await sendAndConfirmTransaction(this.connection, transaction, [fromKeypair]);
+        const connection = connectionPool.getConnection();
+        const signature = await sendAndConfirmTransaction(connection, transaction, [fromKeypair]);
         logger.info('Transferred funds successfully', { from: fromKeypair.publicKey.toString(), to: toAddress, amountSol, signature });
         return signature;
     } catch (error) {
@@ -250,8 +168,9 @@ export class WalletManagementService {
     );
 
     // Explicitly verify the account exists before trying to use it.
+    const connection = connectionPool.getConnection();
     try {
-        await getAccount(this.connection, fromTokenAccountAddress);
+      await getAccount(connection, fromTokenAccountAddress);
     } catch (e) {
         if (e instanceof Error && e.name === 'TokenAccountNotFoundError') {
             logger.error('Source token account NOT FOUND during transfer.', {
@@ -264,13 +183,13 @@ export class WalletManagementService {
         throw e;
     }
 
-    const toTokenAccount = await getOrCreateAssociatedTokenAccount(this.connection, fromKeypair, mintPublicKey, toPublicKey);
+    const toTokenAccount = await getOrCreateAssociatedTokenAccount(connection, fromKeypair, mintPublicKey, toPublicKey);
 
     const transaction = new Transaction().add(
       createTransferInstruction(fromTokenAccountAddress, toTokenAccount.address, fromPublicKey, amount)
     );
 
-    const signature = await sendAndConfirmTransaction(this.connection, transaction, [fromKeypair]);
+    const signature = await sendAndConfirmTransaction(connection, transaction, [fromKeypair]);
     logger.info('SPL Token transferred', { from: fromPublicKey.toString(), to: toAddress, token: tokenMintAddress, amount, signature });
     return signature;
   }
@@ -279,14 +198,15 @@ export class WalletManagementService {
     const ephemeralPublicKey = ephemeralKeypair.publicKey;
     const vaultPublicKey = new PublicKey(vaultAddress);
     const mintPublicKey = new PublicKey(tokenMintAddress);
+    const connection = connectionPool.getConnection();
 
     // Sweep SPL Token and Reclaim Rent 
     try {
         const tokenAta = await getAssociatedTokenAddress(mintPublicKey, ephemeralPublicKey);
-        const tokenAccountInfo = await this.connection.getAccountInfo(tokenAta);
+        const tokenAccountInfo = await connection.getAccountInfo(tokenAta);
 
         if (tokenAccountInfo) {
-            const vaultAta = await getOrCreateAssociatedTokenAccount(this.connection, ephemeralKeypair, mintPublicKey, vaultPublicKey);
+            const vaultAta = await getOrCreateAssociatedTokenAccount(connection, ephemeralKeypair, mintPublicKey, vaultPublicKey);
             const balance = await this.getTokenBalance(ephemeralPublicKey.toString(), tokenMintAddress, true);
 
             const transaction = new Transaction();
@@ -302,7 +222,7 @@ export class WalletManagementService {
                 createCloseAccountInstruction(tokenAta, vaultPublicKey, ephemeralPublicKey)
             );
             
-            await sendAndConfirmTransaction(this.connection, transaction, [ephemeralKeypair]);
+            await sendAndConfirmTransaction(connection, transaction, [ephemeralKeypair]);
             logger.info('Swept SPL token and closed ephemeral token account.', { ephemeralAddress: ephemeralPublicKey.toString() });
         }
     } catch (error) {
@@ -314,7 +234,7 @@ export class WalletManagementService {
         // A small delay to ensure the close account transaction is reflected in the balance
         await delay(1500); 
         
-        const solBalance = await this.connection.getBalance(ephemeralPublicKey);
+        const solBalance = await connection.getBalance(ephemeralPublicKey);
         const fee = 5000; // Fee for the sweep transaction itself
         
         if (solBalance > fee) {
@@ -326,7 +246,7 @@ export class WalletManagementService {
                     lamports: transferAmount,
                 })
             );
-            await sendAndConfirmTransaction(this.connection, transaction, [ephemeralKeypair]);
+            await sendAndConfirmTransaction(connection, transaction, [ephemeralKeypair]);
             logger.info('Swept remaining SOL from ephemeral wallet', { ephemeralAddress: ephemeralPublicKey.toString(), amount: lamportsToSol(transferAmount) });
         }
     } catch (error) {
@@ -394,8 +314,11 @@ export class WalletManagementService {
 
     for (let attempt = 1; attempt <= maxRetries; attempt++) {
       try {
+        const connection = connectionPool.getConnection();
         const publicKey = new PublicKey(walletAddress);
-        const balance = await this.connection.getBalance(publicKey, 'confirmed');
+        const balance = await connection.getBalance(publicKey, 'confirmed');
+
+        connectionPool.recordSuccess(connection.rpcEndpoint);
         
         // Cache the balance
         const balanceInSol = lamportsToSol(balance);
@@ -440,11 +363,13 @@ export class WalletManagementService {
   }
 
   async getTokenBalance(walletAddress: string, tokenMintAddress: string, rawAmount = false): Promise<number> {
+    const connection = connectionPool.getConnection();
+
     try {
         const walletPublicKey = new PublicKey(walletAddress);
         const tokenMintPublicKey = new PublicKey(tokenMintAddress);
         const ataAddress = await getAssociatedTokenAddress(tokenMintPublicKey, walletPublicKey);
-        const accountInfo = await this.connection.getParsedAccountInfo(ataAddress);
+        const accountInfo = await connection.getParsedAccountInfo(ataAddress);
 
         if (!accountInfo.value) return 0;
 
@@ -477,8 +402,10 @@ export class WalletManagementService {
       const initialBalance = await this.getWalletBalance(address);
       callback(initialBalance);
 
+      const { connection, url } = connectionPool.getConnectionForSubscription();
+
       // Set up WebSocket subscription for real-time updates
-      const subscriptionId = this.connection.onAccountChange(
+      const subscriptionId = connection.onAccountChange(
         publicKey,
         (accountInfo, context) => {
           try {
@@ -497,18 +424,19 @@ export class WalletManagementService {
             });
 
             callback(balance);
-            
+            connectionPool.recordSuccess(url);
             // Reset retry counter on successful update
             this.subscriptionRetries.delete(address);
           } catch (error) {
             logger.error('Error processing wallet balance change', { address, error });
+            connectionPool.recordFailure(url);
           }
         },
         'confirmed'
       );
 
       // Store subscription info
-      this.walletSubscriptions.set(address, { subscriptionId, callback });
+      this.walletSubscriptions.set(address, { subscriptionId, callback, connectionUrl: url  });
       this.subscriptionRetries.delete(address); // Reset retry counter
 
       logger.info('Started WebSocket wallet balance monitoring', { 
@@ -569,7 +497,10 @@ export class WalletManagementService {
       // Stop WebSocket subscription
       const subscription = this.walletSubscriptions.get(address);
       if (subscription) {
-        await this.connection.removeAccountChangeListener(subscription.subscriptionId);
+        const connection = connectionPool.getConnection(subscription.connectionUrl);
+        await connection.removeAccountChangeListener(subscription.subscriptionId);
+        connectionPool.releaseSubscription(subscription.connectionUrl);
+
         this.walletSubscriptions.delete(address);
         logger.info('Stopped WebSocket wallet monitoring', { 
           address, 
@@ -602,6 +533,8 @@ export class WalletManagementService {
         throw new Error('Session wallet keypair not available');
       }
 
+      const connection = connectionPool.getConnection();
+
       // Create transfer instruction
       const transferInstruction = SystemProgram.transfer({
         fromPubkey: sessionWallet.keypair.publicKey,
@@ -612,7 +545,7 @@ export class WalletManagementService {
       // Create and send transaction
       const transaction = new Transaction().add(transferInstruction);
       const signature = await sendAndConfirmTransaction(
-        this.connection,
+        connection,
         transaction,
         [sessionWallet.keypair],
         { commitment: 'confirmed' }
@@ -748,12 +681,13 @@ export class WalletManagementService {
   }
 
   async detectFundingSource(walletAddress: string): Promise<string | null> {
+    const connection = connectionPool.getConnection();
     try {
       const publicKey = new PublicKey(walletAddress);
-      const signatures = await this.connection.getSignaturesForAddress(publicKey, { limit: 10 });
+      const signatures = await connection.getSignaturesForAddress(publicKey, { limit: 10 });
 
       for (const sigInfo of signatures) {
-        const transaction = await this.connection.getTransaction(sigInfo.signature, {
+        const transaction = await connection.getTransaction(sigInfo.signature, {
           commitment: 'confirmed',
           maxSupportedTransactionVersion: 0
         });

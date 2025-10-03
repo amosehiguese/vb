@@ -48,7 +48,6 @@ export class SweepService {
         // Validate sweep success
         const validationResult = await this.validateSweep(
           ephemeralAddress,
-          vaultAddress,
           sessionId
         );
 
@@ -137,7 +136,6 @@ export class SweepService {
 
   private async validateSweep(
     ephemeralAddress: string,
-    vaultAddress: string,
     sessionId: string
   ): Promise<{ 
     success: boolean; 
