@@ -82,25 +82,100 @@ const EventItem = ({ event }: { event: SessionEventType }) => {
   };
 
   const getEventMessage = (event: SessionEventType) => {
-    const { eventType, eventData } = event;
+    const { eventType, eventData, status } = event;
+    
     switch (eventType) {
-      case 'funding_detected': return `Received ${eventData?.balance?.toFixed(4)} SOL`;
-      case 'revenue_transferred': return `Revenue transferred: ${eventData?.amount?.toFixed(4)} SOL`;
-      case 'trading_started': return `Trading started with ${eventData?.initialBalance?.toFixed(4)} SOL`;
-      case 'ephemeral_created': return `Ephemeral wallet created for ${eventData?.purpose}`;
-      case 'ephemeral_funded': return `Funded ephemeral with ${eventData?.amount?.toFixed(4)} SOL`;
-      case 'trade_executing': return `Executing ${eventData?.type?.toUpperCase()} trade`;
-      case 'trade_completed': return `${eventData?.type?.toUpperCase()} completed: ${eventData?.amountOut?.toFixed(4)} tokens`;
-      case 'trade_failed': return `Trade failed: ${eventData?.reason || 'Unknown error'}`;
-      case 'sweep_started': return `Sweeping assets (attempt ${eventData?.attempt})`;
-      case 'sweep_completed': return `Sweep completed successfully`;
-      case 'sweep_failed': return `Sweep failed after ${eventData?.attempts} attempts`;
-      case 'balance_updated': return `Balance: ${eventData?.currentBalance?.toFixed(4)} SOL (${eventData?.depletionPercentage?.toFixed(1)}% traded)`;
-      case 'session_paused': return 'Trading paused';
-      case 'session_resumed': return 'Trading resumed';
-      case 'session_stopped': return 'Session stopped';
-      case 'session_completed': return 'Session completed';
-      default: return eventType.replace(/_/g, ' ');
+      // FUNDING EVENTS
+      case 'funding_detected':
+        if (status === 'pending') {
+          return (
+            <div className="space-y-1">
+              <p className="text-sm font-medium text-yellow-300">Funding In Progress</p>
+              <div className="text-xs text-gray-300">
+                <span>Received: </span>
+                <span className="font-mono">{eventData?.balance?.toFixed(6)} SOL</span>
+                <span className="mx-1">•</span>
+                <span>Required: </span>
+                <span className="font-mono">{eventData?.required?.toFixed(6)} SOL</span>
+              </div>
+              <div className="w-full bg-gray-700 rounded-full h-1.5 mt-1">
+                <div 
+                  className="bg-yellow-400 h-1.5 rounded-full transition-all"
+                  style={{ width: `${eventData?.percentComplete}%` }}
+                />
+              </div>
+              <p className="text-xs text-gray-400">
+                {eventData?.percentComplete}% • {eventData?.stillNeeded?.toFixed(6)} SOL needed
+              </p>
+            </div>
+          );
+        } else {
+          return (
+            <div>
+              <p className="text-sm font-medium text-green-300">Funding Complete</p>
+              <p className="text-xs text-gray-300 mt-0.5">
+                Received: <span className="font-mono">{eventData?.balance?.toFixed(6)} SOL</span>
+              </p>
+            </div>
+          );
+        }
+  
+      // TRADING STARTED
+      case 'trading_started':
+        return (
+          <div>
+            <p className="text-sm font-medium text-blue-300">Trading Started</p>
+            <p className="text-xs text-gray-300 mt-0.5">
+              Balance: <span className="font-mono">{eventData?.initialBalance?.toFixed(6)} SOL</span>
+            </p>
+          </div>
+        );
+  
+      // TRADE COMPLETED
+      case 'trade_completed':
+        const isBuy = eventData?.type === 'buy';
+        return (
+          <div>
+            <p className="text-sm font-medium text-green-300">
+              {isBuy ? 'Buy' : 'Sell'} Trade Completed
+            </p>
+            <div className="grid grid-cols-2 gap-2 text-xs text-gray-300 mt-1">
+              <div>
+                <span className="text-gray-400">In:</span>
+                <span className="font-mono ml-1">{eventData?.amountIn?.toFixed(6)}</span>
+              </div>
+              <div>
+                <span className="text-gray-400">Out:</span>
+                <span className="font-mono ml-1">{eventData?.amountOut?.toFixed(6)}</span>
+              </div>
+            </div>
+            {eventData?.ephemeralWallet && (
+              <p className="text-xs text-gray-400 mt-1 font-mono truncate">
+                {eventData.ephemeralWallet.slice(0, 8)}...{eventData.ephemeralWallet.slice(-8)}
+              </p>
+            )}
+          </div>
+        );
+  
+      // TRADE FAILED
+      case 'trade_failed':
+        return (
+          <div>
+            <p className="text-sm font-medium text-red-300">
+              {eventData?.type === 'buy' ? 'Buy' : 'Sell'} Trade Failed
+            </p>
+            <p className="text-xs text-red-200 mt-0.5">{eventData?.reason || 'Unknown error'}</p>
+            {eventData?.ephemeralWallet && (
+              <p className="text-xs text-gray-400 mt-1 font-mono truncate">
+                {eventData.ephemeralWallet.slice(0, 8)}...{eventData.ephemeralWallet.slice(-8)}
+              </p>
+            )}
+          </div>
+        );
+  
+      // Hide other events
+      default:
+        return null;
     }
   };
 
@@ -263,17 +338,24 @@ export default function SessionStatusDashboard({ sessionId, session }: { session
             </div>
         </div>
         <div className="space-y-2 max-h-[600px] overflow-y-auto pr-2">
-          {loading ? (
-            <div className="flex items-center justify-center py-8">
-              <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-cyan-400"></div>
-            </div>
-          ) : allEvents.length === 0 ? (
-            <div className="text-center py-8 text-gray-500">
-              <p>No events yet. Waiting for activity...</p>
-            </div>
-          ) : (
-            allEvents.map((event, index) => <EventItem key={event.id || index} event={event} />)
-          )}
+        {loading ? (
+          <div className="flex items-center justify-center py-8">
+            <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-cyan-400"></div>
+          </div>
+        ) : allEvents.length === 0 ? (
+          <div className="text-center py-8 text-gray-500">
+            <p>No events yet. Waiting for activity...</p>
+          </div>
+        ) : (
+          allEvents
+            .filter(e => 
+              e.eventType === 'funding_detected' ||
+              e.eventType === 'trading_started' ||
+              e.eventType === 'trade_completed' ||
+              e.eventType === 'trade_failed'
+            )
+            .map((event, index) => <EventItem key={event.id || index} event={event} />)
+        )}
         </div>
       </div>
     </div>

@@ -1,4 +1,3 @@
-// frontend/client/src/components/RecoveryDashboard.tsx
 import React, { useState, useEffect } from 'react';
 import { API_ENDPOINTS } from '@/config/api';
 import { toast } from "react-hot-toast";

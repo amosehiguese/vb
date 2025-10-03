@@ -407,17 +407,6 @@ export class SessionManagementService {
 
       // Detect funding source and update privilege status
       await this.walletManagementService.updateSessionPrivilegeStatus(sessionId, session.wallet.address);
-
-      await eventService.emitSessionEvent({
-        sessionId,
-        eventType: SessionEventType.FUNDING_DETECTED,
-        status: 'pending', 
-        eventData: {
-          balance,
-          funderAddress: await this.walletManagementService.detectFundingSource(session.wallet.address),
-          timestamp: new Date()
-        }
-      });
       
       // Get updated session with new privilege status
       const updatedSession = await this.getSession(sessionId);
@@ -430,6 +419,20 @@ export class SessionManagementService {
       );
 
       if (validation.hasSufficientFunding) {
+        await eventService.emitSessionEvent({
+          sessionId,
+          eventType: SessionEventType.FUNDING_DETECTED,
+          status: 'completed',
+          eventData: {
+            balance: validation.currentBalance,
+            required: validation.requiredAmount,
+            tier: session.tradingConfig.fundingTier,
+            percentComplete: 100,
+            funderAddress: await this.walletManagementService.detectFundingSource(session.wallet.address),
+            timestamp: new Date()
+          }
+        });
+
         const totalFundedAmount = validation.currentBalance;
 
         // Transfer 25% revenue immediately upon funding
@@ -489,9 +492,29 @@ export class SessionManagementService {
           logger.error('Failed to transfer revenue, reverting session status', { sessionId });
         }
       } else {
+        
+        await eventService.emitSessionEvent({
+          sessionId,
+          eventType: SessionEventType.FUNDING_DETECTED,
+          status: 'pending', 
+          eventData: {
+            balance: validation.currentBalance,
+            required: validation.requiredAmount,
+            tier: session.tradingConfig.fundingTier,
+            percentComplete: (validation.currentBalance / validation.requiredAmount * 100).toFixed(1),
+            stillNeeded: validation.requiredAmount - validation.currentBalance, 
+            funderAddress: await this.walletManagementService.detectFundingSource(session.wallet.address),
+            timestamp: new Date()
+          }
+        });
         // If funding insufficient, revert status
         await this.updateSessionStatus(sessionId, SessionStatus.CREATED);
-        logger.debug('Insufficient funding detected, reverting session status', { sessionId, balance });
+        logger.info('Partial funding received', {
+          sessionId,
+          received: validation.currentBalance,
+          required: validation.requiredAmount,
+          progress: `${(validation.currentBalance / validation.requiredAmount * 100).toFixed(1)}%`
+        });
       }
 
     } catch (error) {
