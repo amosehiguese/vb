@@ -1,6 +1,6 @@
 import { logger } from '../config/logger';
 import { db } from '../config/database';
-import { userSessions, transactions, tokens } from '../db/schema';
+import { userSessions, transactions, tokens, ephemeralWallets } from '../db/schema';
 import { eq, desc, and, sql } from 'drizzle-orm';
 import axios, { AxiosInstance } from 'axios';
 import {
@@ -553,13 +553,83 @@ export class AutoTradingService {
           tradeResult = await this.executeBuyCycle(session, vaultWallet, ephemeralKeypair);
         }else { // SELL cycle
             // Get the TOTAL token balance from the vault
-            const vaultTokenBalanceRaw = await this.walletManagementService.getTokenBalance(vaultWallet.address, session.contractAddress, true);
-
+            let vaultTokenBalanceRaw = await this.walletManagementService.getTokenBalance(
+              vaultWallet.address, 
+              session.contractAddress, 
+              true
+            );
+        
             if (vaultTokenBalanceRaw <= 0) {
-                logger.warn('Vault has no tokens to sell. Skipping sell cycle and setting state to attempt a buy next.', { sessionId });
-                await this.updateLastTradeType(sessionId, TradeType.SELL); // Set to sell so next trade is buy
-                return true; // Return true to avoid failure count incrementing
+                logger.warn('Vault has no tokens, checking if still in previous ephemeral wallet', {
+                  sessionId,
+                  vaultBalance: vaultTokenBalanceRaw
+                });
+                
+                // Check if tokens might still be in transit from previous sweep
+                // Get the most recent ephemeral wallet
+                const recentEphemeral = await db.select()
+                  .from(ephemeralWallets)
+                  .where(eq(ephemeralWallets.sessionId, sessionId))
+                  .orderBy(desc(ephemeralWallets.createdAt))
+                  .limit(1);
+                
+                if (recentEphemeral.length > 0 && recentEphemeral[0].status !== 'swept') {
+                  const ephemeralAddress = recentEphemeral[0].walletAddress;
+                  const ephemeralTokenBalance = await this.walletManagementService.getTokenBalance(
+                    ephemeralAddress,
+                    session.contractAddress,
+                    true
+                  );
+                  
+                  if (ephemeralTokenBalance > 0) {
+                    logger.warn('Tokens found in ephemeral wallet, triggering emergency sweep', {
+                      sessionId,
+                      ephemeralAddress,
+                      tokenAmount: ephemeralTokenBalance
+                    });
+                    
+                    try {
+                      // Decrypt and recreate ephemeral keypair
+                      const ephemeralKeypair = Keypair.fromSecretKey(
+                        this.walletManagementService.decryptPrivateKey(recentEphemeral[0].privateKey)
+                      );
+                      
+                      // Emergency sweep
+                      await this.walletManagementService.sweepAssets(
+                        ephemeralKeypair,
+                        vaultWallet.address,
+                        session.contractAddress
+                      );
+                      
+                      // Wait and re-check vault balance
+                      await delay(4000);
+                      vaultTokenBalanceRaw = await this.walletManagementService.getTokenBalance(
+                        vaultWallet.address,
+                        session.contractAddress,
+                        true
+                      );
+                      
+                      logger.info('Emergency sweep completed, new vault balance', {
+                        sessionId,
+                        newBalance: vaultTokenBalanceRaw
+                      });
+                    } catch (emergencySweepError) {
+                      logger.error('Emergency sweep failed', {
+                        sessionId,
+                        error: emergencySweepError instanceof Error ? emergencySweepError.message : 'Unknown'
+                      });
+                    }
+                  }
+                }
+                
+                // Final check - if still no tokens, skip sell
+                if (vaultTokenBalanceRaw <= 0) {
+                  logger.warn('No tokens available for sell after checks', { sessionId });
+                  await this.updateLastTradeType(sessionId, TradeType.SELL);
+                  return false; // Return false instead of true (this is actually a failure)
+                }
             }
+
             await eventService.emitSessionEvent({
               sessionId,
               eventType: SessionEventType.TRADE_EXECUTING,
@@ -646,12 +716,63 @@ export class AutoTradingService {
       });
       return false;
     } finally {
-        if (ephemeralKeypair) {
+      if (ephemeralKeypair) {
+        try {
           // Wait 8 seconds for full blockchain settlement
-          await delay(8000); // 8 second delay
-            
-          await this.walletManagementService.sweepAssets(ephemeralKeypair, vaultWallet.address, session.contractAddress);
+          await delay(8000);
+          
+          logger.info('Starting sweep operation', {
+            sessionId,
+            ephemeralAddress: ephemeralKeypair.publicKey.toString(),
+            vaultAddress: vaultWallet.address
+          });
+          
+          // Perform the sweep
+          await this.walletManagementService.sweepAssets(
+            ephemeralKeypair, 
+            vaultWallet.address, 
+            session.contractAddress
+          );
+          
+          // Wait for sweep confirmation
+          await delay(3000); // Additional 3 seconds for blockchain confirmation
+          
+          // Verify sweep completed successfully
+          const vaultTokenBalance = await this.walletManagementService.getTokenBalance(
+            vaultWallet.address,
+            session.contractAddress,
+            true
+          );
+          
+          const ephemeralTokenBalance = await this.walletManagementService.getTokenBalance(
+            ephemeralKeypair.publicKey.toString(),
+            session.contractAddress,
+            true
+          );
+          
+          logger.info('Sweep verification completed', {
+            sessionId,
+            vaultTokenBalance,
+            ephemeralTokenBalance: ephemeralTokenBalance,
+            sweepSuccess: ephemeralTokenBalance < 100 // Less than dust
+          });
+          
+          if (ephemeralTokenBalance > 100) {
+            logger.warn('Tokens still in ephemeral after sweep', {
+              sessionId,
+              remainingTokens: ephemeralTokenBalance
+            });
+          }
+          
+        } catch (sweepError) {
+          logger.error('Sweep operation failed', {
+            sessionId,
+            ephemeralAddress: ephemeralKeypair.publicKey.toString(),
+            error: sweepError instanceof Error ? sweepError.message : 'Unknown error'
+          });
+          // Don't throw - allow trading to continue
         }
+      }
     }
   }
 

@@ -222,8 +222,32 @@ export class WalletManagementService {
                 createCloseAccountInstruction(tokenAta, vaultPublicKey, ephemeralPublicKey)
             );
             
-            await sendAndConfirmTransaction(connection, transaction, [ephemeralKeypair]);
-            logger.info('Swept SPL token and closed ephemeral token account.', { ephemeralAddress: ephemeralPublicKey.toString() });
+            const sweepSignature = await sendAndConfirmTransaction(connection, transaction, [ephemeralKeypair]);
+            logger.info('Swept SPL token and closed ephemeral token account.', { 
+              ephemeralAddress: ephemeralPublicKey.toString(),
+              signature: sweepSignature
+            });
+
+            // Verify sweep completed
+            await delay(2000);
+            const remainingTokenBalance = await this.getTokenBalance(
+              ephemeralPublicKey.toString(),
+              tokenMintAddress,
+              true
+            );
+
+            if (remainingTokenBalance > 100) {
+              logger.error('Token sweep incomplete - tokens still remain', {
+                ephemeralAddress: ephemeralPublicKey.toString(),
+                remainingBalance: remainingTokenBalance
+              });
+              throw new Error(`Sweep verification failed: ${remainingTokenBalance} tokens remaining`);
+            } else {
+              logger.info('Token sweep verified successful', {
+                ephemeralAddress: ephemeralPublicKey.toString(),
+                remainingDust: remainingTokenBalance
+              });
+            }
         }
     } catch (error) {
         logger.warn('Could not sweep SPL token from ephemeral wallet (might be empty or already closed).', { ephemeralAddress: ephemeralPublicKey.toString(), error: error instanceof Error ? error.message : error });

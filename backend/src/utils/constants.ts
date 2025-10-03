@@ -24,7 +24,7 @@ export const TRADING_CONSTANTS = {
   SLIPPAGE_INCREMENT: 2, 
   MIN_TRADE_USD: 0.50,
   MIN_LIQUIDITY_USD: 1, // $1 minimum liquidity
-  TRADE_INTERVAL_MS: 5000, // 5 seconds between trades
+  TRADE_INTERVAL_MS: 15000, // 15 seconds between trades
   MAX_CONSECUTIVE_FAILURES: 5,
   WALLET_BALANCE_CHECK_INTERVAL: 10000, // 10 seconds
   TRANSACTION_TIMEOUT: 30000, // 30 seconds
